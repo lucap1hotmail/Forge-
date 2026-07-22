@@ -43,7 +43,7 @@ const DomainCtx = React.createContext(C.textFaint);
 const CURRENCY = "$";
 const STORAGE_KEY = "lucaFinanceOS_v1"; // unchanged → data persists
 const LOCALE = "en-AU";
-const APP_VERSION = "v8.7";
+const APP_VERSION = "v9.0";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "Luca", started: new Date().toISOString() },
@@ -626,14 +626,28 @@ function workRecords(data) {
     (data.uber || []).filter((u) => (u.type || "uber") === "uber").forEach((u) => { const w = weekKeyOf(u.date), m = (u.date || "").slice(0, 7), g = Number(u.gross || 0); wk[w] = (wk[w] || 0) + g; mo[m] = (mo[m] || 0) + g; });
     return { bestWeek: Math.max(0, ...Object.values(wk)), bestMonth: Math.max(0, ...Object.values(mo)) };
 }
-function incMonthly(data) {
-    const m = {};
-    (data.income || []).forEach((i) => { if (i.kind !== "income" || i.taxSource === "abn" || i.gross == null)
-        return; const k = (i.workedWeek || i.date || "").slice(0, 7); if (k)
-        m[k] = (m[k] || 0) + Number(i.gross || 0); });
-    (data.uber || []).forEach((u) => { const k = (u.date || "").slice(0, 7); if (k)
-        m[k] = (m[k] || 0) + Number(u.gross || 0); });
-    return m;
+// SINGLE SOURCE for money-received stats: reads data.income ONLY.
+// TFN → amount (net, gross−withheld). ABN → amount (gross) minus ATO provision = "really yours".
+function moneyStats(data) {
+    const prov = currentSetAsideRate(data);
+    const byMonth = {}, byWeek = {};
+    (data.income || []).filter((i) => i.kind === "income").forEach((i) => {
+        const received = Number(i.amount || 0);
+        const yours = i.taxSource === "abn" ? received * (1 - prov) : received;
+        const mk = monthKeyOf(i.date || i.week || "");
+        const wk = weekKeyOf(i.date || i.week || "");
+        if (mk)
+            byMonth[mk] = (byMonth[mk] || 0) + yours;
+        if (wk)
+            byWeek[wk] = (byWeek[wk] || 0) + yours;
+    });
+    const curM = todayKey().slice(0, 7), curW = weekKeyOf(todayKey());
+    return {
+        thisMonth: byMonth[curM] || 0, thisWeek: byWeek[curW] || 0,
+        bestMonth: Math.max(0, ...Object.values(byMonth), 0),
+        bestWeek: Math.max(0, ...Object.values(byWeek), 0),
+        byMonth,
+    };
 }
 function spendMonthly(data) {
     const m = {};
@@ -644,14 +658,14 @@ function spendMonthly(data) {
     return m;
 }
 function computeRecords(data) {
-    const wr = workRecords(data);
+    const ms = moneyStats(data);
     const sm = spendMonthly(data);
     const curM = todayKey().slice(0, 7);
     const completed = Object.entries(sm).filter(([k]) => k !== curM).map(([, v]) => v);
     const acc = data.accounts || {};
     return {
-        incMonth: wr.bestMonth || 0,
-        incWeek: wr.bestWeek || 0,
+        incMonth: ms.bestMonth || 0,
+        incWeek: ms.bestWeek || 0,
         spendBiggest: Math.max(0, ...(data.spend || []).map((s) => Number(s.amount || 0))),
         spendLowMonth: completed.length ? Math.min(...completed) : null,
         netWorth: Number(acc.checking || 0) + Number(acc.savings || 0),
@@ -663,7 +677,7 @@ function monthName2(k) { const [y, mo] = (k || "").split("-"); if (!y)
 function pctDiff(cur, base) { return base > 0 ? Math.round(((cur - base) / base) * 100) : null; }
 function incomeInsights(data) {
     const out = [];
-    const im = incMonthly(data);
+    const im = moneyStats(data).byMonth;
     const entries = Object.entries(im);
     if (!entries.length)
         return out;
@@ -748,6 +762,15 @@ function workAverages(data) {
     const avg = (map, f) => { const v = Object.values(map); return v.length ? v.reduce((s, x) => s + f(x), 0) / v.length : 0; };
     return { wkGross: avg(wk, (v) => v.g), wkHours: avg(wk, (v) => v.h), moGross: avg(mo, (v) => v.g), moHours: avg(mo, (v) => v.h) };
 }
+function topEmpRate(data) {
+    let top = 0;
+    (data.positions || []).forEach((p) => {
+        const base = Number(p.rate || 0);
+        const mults = [1, Number(p.otMult) || 0, Number(p.ot2Mult) || 0, Number(p.satMult) || 0, Number(p.sunMult) || 0, Number(p.holMult) || 0];
+        top = Math.max(top, base * Math.max(...mults));
+    });
+    return top;
+}
 function activityRecords(data) {
     const fuelPrice = Number(data.tax?.fuelPrice || 0);
     const fuel = (u) => Number(u.km || 0) * (Number(u.cons || 0) / 100) * fuelPrice;
@@ -773,7 +796,7 @@ function activityRecords(data) {
     const ubProfitHr = Math.max(0, ...ub.filter((x) => x.hours > 0).map((x) => x.profit / x.hours));
     return {
         hasEmp: emp.length > 0, hasUber: ub.length > 0,
-        emp: { weekPay: maxV(empWeekPay), monthPay: maxV(empMonthPay), weekH: maxV(empWeekH), monthH: maxV(empMonthH), rate: empRate, avgWeekH: avgV(empWeekH) },
+        emp: { weekPay: maxV(empWeekPay), monthPay: maxV(empMonthPay), weekH: maxV(empWeekH), monthH: maxV(empMonthH), rate: Math.max(empRate, topEmpRate(data)), avgWeekH: avgV(empWeekH) },
         uber: { day: maxV(ubDay), week: maxV(ubWeek), month: maxV(ubMonth), bestProfit: ubBestProfit, profitHr: ubProfitHr, avgWeek: avgV(ubWeek) },
     };
 }
@@ -1084,11 +1107,9 @@ function Commitments({ data, update }) {
                     React.createElement("span", { style: { width: 9, height: 9, borderRadius: 99, background: dot[plan.status], flexShrink: 0, marginTop: 4 } }),
                     React.createElement("span", { style: { fontSize: 12.5, fontWeight: 600, color: C.text, lineHeight: 1.35 } }, plan.msg)),
                 plan.required > 0 && React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 5 } },
-                    "Need ",
+                    "Must goals: ",
                     fmt(plan.required),
-                    "/wk \u00B7 ",
-                    fmt(plan.required * 4.33),
-                    "/mo for Must goals \u00B7 baseline ",
+                    "/wk \u00B7 baseline ",
                     fmt(plan.baseline),
                     "/wk"))),
             React.createElement("div", { style: { marginTop: 10 } },
@@ -1097,28 +1118,26 @@ function Commitments({ data, update }) {
                     const st = feas[p.id] || { status: "green", note: "", need: 0 };
                     const pct = p.target > 0 ? Math.min(100, (Number(p.allocated || 0) / p.target) * 100) : 0;
                     const open = openId === p.id;
-                    return (React.createElement("div", { key: p.id, style: { padding: "11px 0", borderTop: `1px solid ${C.line}` } },
+                    return (React.createElement("div", { key: p.id, style: { padding: "13px 0", borderTop: `1px solid ${C.line}` } },
                         React.createElement("div", { onClick: () => { setOpenId(open ? null : p.id); setAllocAmt(""); }, style: { cursor: "pointer" } },
-                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 } },
+                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 } },
                                 React.createElement("span", { style: { fontSize: 14.5, fontWeight: 600 } },
                                     React.createElement("span", { style: { display: "inline-block", width: 8, height: 8, borderRadius: 99, background: dot[st.status], marginRight: 8, verticalAlign: "middle" } }),
                                     p.icon,
                                     " ",
                                     p.name,
-                                    React.createElement("span", { style: { color: (priMeta[p.priority] || priMeta.need).c, fontSize: 10, fontWeight: 800, marginLeft: 6, letterSpacing: 0.5 } }, (priMeta[p.priority] || priMeta.need).l)),
+                                    React.createElement("span", { style: { color: (priMeta[p.priority] || priMeta.need).c, fontSize: 9.5, fontWeight: 800, marginLeft: 7, letterSpacing: 0.5 } }, (priMeta[p.priority] || priMeta.need).l)),
                                 React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: C.textDim } },
                                     fmt(p.allocated || 0),
                                     " / ",
                                     fmt(p.target))),
-                            React.createElement("div", { style: { height: 7, background: C.bgCardHi, borderRadius: 99, overflow: "hidden" } },
+                            React.createElement("div", { style: { height: 6, background: C.bgCardHi, borderRadius: 99, overflow: "hidden" } },
                                 React.createElement("div", { style: { width: `${Math.max(2, pct)}%`, height: "100%", background: dot[st.status], borderRadius: 99, transition: "width .5s cubic-bezier(.4,0,.2,1)" } })),
-                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textFaint, marginTop: 6 } },
+                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textFaint, marginTop: 7 } },
                                 React.createElement("span", null,
-                                    "Need ",
-                                    fmt(st.need),
-                                    st.perPay > 0 ? ` · ${fmt(st.perPay)}/pay` : "",
-                                    p.due ? " · by " + shortDate(p.due) : ""),
-                                React.createElement("span", { style: { color: dot[st.status], fontWeight: 700 } }, st.note))),
+                                    st.perPay > 0 ? `${fmt(st.perPay)}/pay` : "Funded",
+                                    p.due ? ` · by ${shortDate(p.due)}` : ""),
+                                st.status !== "green" && React.createElement("span", { style: { color: dot[st.status], fontWeight: 700 } }, st.note))),
                         open && (React.createElement("div", { style: { marginTop: 10, background: C.bgCardHi, borderRadius: 12, padding: 12 } },
                             st.need > 0 && st.weeksLeft && React.createElement("div", { style: { fontSize: 11.5, color: C.text, marginBottom: 10, lineHeight: 1.4 } },
                                 "\uD83D\uDCA1 Allocate ",
@@ -1380,7 +1399,7 @@ function Home({ data, update, setTab, openHistory, openWork }) {
                         React.createElement(RecordChip, { label: "Biggest week (pay)", value: fmt(r.emp.weekPay) }),
                         React.createElement(RecordChip, { label: "Biggest month (pay)", value: fmt(r.emp.monthPay) }),
                         React.createElement(RecordChip, { label: "Biggest week (hours)", value: `${+r.emp.weekH.toFixed(1)} h` }),
-                        React.createElement(RecordChip, { label: "Best rate /h", value: fmt(r.emp.rate) })))),
+                        React.createElement(RecordChip, { label: "Top rate /h", value: fmt(r.emp.rate) })))),
                 r.hasUber && (React.createElement(React.Fragment, null,
                     React.createElement("div", { style: { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: C.textFaint, margin: "14px 0 8px" } },
                         "\uD83D\uDE97 Uber records",
@@ -2016,13 +2035,13 @@ function Income({ data, update, openHistory, showToast }) {
             React.createElement("button", { onClick: () => setView("month"), style: { flex: 1, padding: "11px 0", borderRadius: 9, border: "none", background: view === "month" ? C.green : "transparent", color: view === "month" ? "#0a1018" : C.textDim, fontWeight: 800, fontSize: 13.5, fontFamily: "inherit", cursor: "pointer" } }, "This month"),
             React.createElement("button", { onClick: () => setView("tax"), style: { flex: 1, padding: "11px 0", borderRadius: 9, border: "none", background: view === "tax" ? C.gold : "transparent", color: view === "tax" ? "#1a1407" : C.textDim, fontWeight: 800, fontSize: 13.5, fontFamily: "inherit", cursor: "pointer" } }, "Tax year")),
         view === "tax" ? React.createElement(TaxYear, { data: data, openHistory: openHistory }) : (React.createElement(React.Fragment, null,
-            React.createElement(Hero, { label: "Income this month", value: fmt(t.monthIncomeActual), color: C.green, sub: `This week: ${fmt(t.weeklyIncome)}` }),
+            React.createElement(Hero, { label: "Really yours this month", value: fmt(moneyStats(data).thisMonth), color: C.green, sub: `This week: ${fmt(moneyStats(data).thisWeek)} · TFN net + ABN after ATO` }),
             React.createElement(InsightCard, { lines: incomeInsights(data), tone: C.green }),
             (() => {
-                const wr = workRecords(data);
-                return (wr.bestMonth > 0 || wr.bestWeek > 0) ? (React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
-                    React.createElement(RecordChip, { label: "Best month", value: fmt(wr.bestMonth) }),
-                    React.createElement(RecordChip, { label: "Best week", value: fmt(wr.bestWeek) }))) : null;
+                const ms = moneyStats(data);
+                return (ms.bestMonth > 0 || ms.bestWeek > 0) ? (React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
+                    React.createElement(RecordChip, { label: "Best month", value: fmt(ms.bestMonth) }),
+                    React.createElement(RecordChip, { label: "Best week", value: fmt(ms.bestWeek) }))) : null;
             })(),
             (() => {
                 const rows = reconcile(data);
@@ -2934,7 +2953,7 @@ function allTx(data) {
         else
             out.push({ id: i.id, src: "income", kind: "income", taxSource: "tfn", date: i.date, label: i.source || "TFN pay", amount: Number(i.gross ?? i.amount ?? 0), cat: "TFN income", raw: i });
     });
-    (data.uber || []).forEach((u) => out.push({ id: u.id, src: "uber", kind: "income", taxSource: "abn", date: u.date, label: u.type === "abn" ? "ABN shift" : "Uber shift", amount: Number(u.gross || 0), cat: "ABN shift", raw: u }));
+    (data.uber || []).forEach((u) => out.push({ id: u.id, src: "uber", kind: "work", taxSource: "abn", date: u.date, label: u.type === "abn" ? "ABN shift" : "Uber shift", amount: Number(u.gross || 0), cat: "ABN shift", raw: u }));
     (data.spend || []).forEach((s) => out.push({ id: s.id, src: "spend", kind: "spend", taxSource: null, date: s.date, label: s.label || "Spend", amount: Number(s.amount || 0), cat: s.cat || "Other", raw: s }));
     (data.payments || []).forEach((p) => out.push({ id: p.id, src: "payment", kind: "spend", taxSource: null, date: p.date, label: p.name || "Fixed cost", amount: Number(p.amount || 0), cat: p.cat || "Fixed", raw: p }));
     return out;
@@ -2972,7 +2991,7 @@ function History({ data, update, preset, onClose }) {
         return true;
     });
     list.sort((a, b) => sort === "amt_desc" ? b.amount - a.amount : sort === "amt_asc" ? a.amount - b.amount : sort === "date_asc" ? (a.date < b.date ? -1 : a.date > b.date ? 1 : 0) : (a.date > b.date ? -1 : a.date < b.date ? 1 : 0));
-    const total = list.reduce((s, t) => s + (t.kind === "spend" ? -t.amount : t.amount), 0);
+    const total = list.reduce((s, t) => s + (t.kind === "spend" ? -t.amount : t.kind === "work" ? 0 : t.amount), 0);
     const startEdit = (t) => { setEditId(t.id); setBuf({ ...t.raw }); };
     const num = (v) => Number(String(v).replace(/,/g, ".").replace(/[^0-9.]/g, "")) || 0;
     const saveEdit = (t) => {
@@ -3075,9 +3094,10 @@ function History({ data, update, preset, onClose }) {
                                 shortDate(t.date),
                                 " \u00B7 ",
                                 React.createElement("span", { style: { color: b[1] } }, b[0]))),
-                        React.createElement("div", { style: { fontSize: 15, fontWeight: 800, color: t.kind === "spend" ? C.red : C.green } },
+                        React.createElement("div", { style: { fontSize: 15, fontWeight: 800, color: t.kind === "spend" ? C.red : t.kind === "work" ? C.textFaint : C.green } },
                             t.kind === "spend" ? "−" : "",
-                            fmt(t.amount))),
+                            fmt(t.amount),
+                            t.kind === "work" ? React.createElement("span", { style: { fontSize: 9.5, fontWeight: 800, color: C.textFaint, marginLeft: 5, letterSpacing: 0.5 } }, "WORK") : "")),
                     open && React.createElement(TxEditor, { t: t, buf: buf, setBuf: setBuf, cats: data.categories, onSave: () => saveEdit(t), onDel: () => delTx(t) })));
             }))));
 }
