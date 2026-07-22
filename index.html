@@ -43,7 +43,7 @@ const DomainCtx = React.createContext(C.textFaint);
 const CURRENCY = "$";
 const STORAGE_KEY = "lucaFinanceOS_v1"; // unchanged → data persists
 const LOCALE = "en-AU";
-const APP_VERSION = "v7.9";
+const APP_VERSION = "v8.5";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "Luca", started: new Date().toISOString() },
@@ -74,6 +74,7 @@ const seed = () => ({
     timesheets: [],
     uber: [],
     accounts: { checking: 0, savings: 0, asOf: todayKey(), asOfTs: nowTs() },
+    commitments: { projects: [], weeklySurplus: 0, paydayDow: 4, bufferOverride: null, uberMax: 0 },
     backup: { last: null, reminderDays: 7 },
     categories: ["Housing & Bills", "Subscriptions", "Groceries", "Going out", "Transport", "Health & Fitness", "Saving", "Investing", "Other"],
 });
@@ -256,6 +257,7 @@ function App() {
         workOpen && React.createElement(WorkSessionForm, { data: data, update: update, showToast: showToast, onClose: () => setWorkOpen(false) })));
 }
 function migrate(d) {
+    var _a;
     const base = seed();
     d.income || (d.income = []);
     d.fixed || (d.fixed = base.fixed);
@@ -268,6 +270,11 @@ function migrate(d) {
     (d.income || []).forEach((i) => { if (!i.kind)
         i.kind = "income"; });
     d.accounts || (d.accounts = { checking: 0, savings: 0, asOf: todayKey(), asOfTs: nowTs() });
+    d.commitments = { projects: [], weeklySurplus: 0, paydayDow: 4, bufferOverride: null, uberMax: 0, ...(d.commitments && typeof d.commitments === "object" ? d.commitments : {}) };
+    (_a = d.commitments).projects || (_a.projects = []);
+    d.commitments.projects.forEach((p) => { if (p.priority === "flex")
+        p.priority = "need"; if (!["must", "need", "want"].includes(p.priority))
+        p.priority = "need"; });
     d.records || (d.records = {});
     d.positions || (d.positions = []);
     d.timesheets || (d.timesheets = []);
@@ -435,21 +442,7 @@ function AccountToggle({ value, onChange }) {
             } }, labv))))));
 }
 function Accounts({ data, update }) {
-    const acc = data.accounts || { checking: 0, savings: 0, asOf: todayKey() };
-    // Precise timestamp gate: only count items created strictly AFTER the last reconcile moment.
-    const sinceTs = acc.asOfTs || ((acc.asOf || "0000-00-00") + "T23:59:59.999Z");
-    const tsOf = (x) => x.ts || ((x.date || x.week || "0000-00-00") + "T12:00:00.000Z");
-    const after = (x) => tsOf(x) > sinceTs;
-    // Income entries (TFN net + ABN payouts) move the balance. Shifts do NOT.
-    const incomeSince = data.income.filter(after).reduce((s, i) => s + Number(i.amount || 0), 0);
-    // a "Saving" spend is a transfer: leaves checking, lands in savings
-    const transfersSince = data.spend.filter((x) => x.cat === "Saving" && after(x)).reduce((s, x) => s + Number(x.amount || 0), 0);
-    // real expenses (not transfers) reduce the account they were paid from
-    const realExp = [...data.spend.filter((x) => x.cat !== "Saving"), ...data.payments].filter(after);
-    const fromChecking = realExp.filter((x) => (x.account || "checking") === "checking").reduce((s, x) => s + Number(x.amount || 0), 0);
-    const fromSavings = realExp.filter((x) => x.account === "savings").reduce((s, x) => s + Number(x.amount || 0), 0);
-    const expChecking = Number(acc.checking || 0) + incomeSince - transfersSince - fromChecking;
-    const expSavings = Number(acc.savings || 0) + transfersSince - fromSavings;
+    const { checking: expChecking, savings: expSavings, acc } = computeAccounts(data);
     const [edit, setEdit] = useState(false);
     const [ck, setCk] = useState("");
     const [sv, setSv] = useState("");
@@ -731,6 +724,423 @@ function fySummary(data) {
     const paygRate = tfnGross > 0 ? withheld / tfnGross : 0; // PAYG withholding rate on TFN gross
     return { fy, tfnGross, abnGross, withheld, estTax, carDed, otherDed, taxable, lito, effRate, marginal, paygRate, refund: Math.max(0, withheld - estTax), owe: Math.max(0, estTax - withheld) };
 }
+// ─────────────────────────────────────────────────────────────
+//  UPCOMING COMMITMENTS — reserved cash / free cash forecasting
+// ─────────────────────────────────────────────────────────────
+function computeAccounts(data) {
+    const acc = data.accounts || { checking: 0, savings: 0, asOf: todayKey() };
+    const sinceTs = acc.asOfTs || ((acc.asOf || "0000-00-00") + "T23:59:59.999Z");
+    const tsOf = (x) => x.ts || ((x.date || x.week || "0000-00-00") + "T12:00:00.000Z");
+    const after = (x) => tsOf(x) > sinceTs;
+    const incomeSince = (data.income || []).filter(after).reduce((s, i) => s + Number(i.amount || 0), 0);
+    const transfersSince = (data.spend || []).filter((x) => x.cat === "Saving" && after(x)).reduce((s, x) => s + Number(x.amount || 0), 0);
+    const realExp = [...(data.spend || []).filter((x) => x.cat !== "Saving"), ...(data.payments || [])].filter(after);
+    const fromChecking = realExp.filter((x) => (x.account || "checking") === "checking").reduce((s, x) => s + Number(x.amount || 0), 0);
+    const fromSavings = realExp.filter((x) => x.account === "savings").reduce((s, x) => s + Number(x.amount || 0), 0);
+    const checking = Number(acc.checking || 0) + incomeSince - transfersSince - fromChecking;
+    const savings = Number(acc.savings || 0) + transfersSince - fromSavings;
+    return { checking, savings, total: checking + savings, acc };
+}
+function toWeeklyAmt(amount, cadence) {
+    const a = Number(amount) || 0;
+    if (cadence === "weekly")
+        return a;
+    if (cadence === "fortnightly")
+        return a / 2;
+    if (cadence === "yearly")
+        return a / 52;
+    return a * 12 / 52; // monthly default
+}
+const DAY_MS = 86400000;
+function nextPayDate(data, from) {
+    const dow = Number(data.commitments?.paydayDow ?? 4);
+    const dt = new Date(from.getTime());
+    for (let i = 0; i < 14; i++) {
+        dt.setDate(dt.getDate() + 1);
+        if (dt.getDay() === dow)
+            return dt;
+    }
+    return new Date(from.getTime() + 7 * DAY_MS);
+}
+function nextBillDate(f, from) {
+    const cad = f.cadence;
+    if (cad === "weekly" || cad === "fortnightly") {
+        if (f.dueDow == null)
+            return null;
+        const dt = new Date(from.getTime());
+        for (let i = 0; i < 14; i++) {
+            if (dt.getDay() === Number(f.dueDow) && dt >= from)
+                return dt;
+            dt.setDate(dt.getDate() + 1);
+        }
+        return null;
+    }
+    if (cad === "monthly" || cad === "quarterly") {
+        if (f.dueDom == null)
+            return null;
+        const dom = Math.min(31, Number(f.dueDom));
+        let d = new Date(from.getFullYear(), from.getMonth(), dom, 12);
+        if (d < from)
+            d = new Date(from.getFullYear(), from.getMonth() + 1, dom, 12);
+        return d;
+    }
+    if (cad === "yearly") {
+        if (f.dueDom == null || f.dueMonth == null)
+            return null;
+        let d = new Date(from.getFullYear(), Number(f.dueMonth) - 1, Number(f.dueDom), 12);
+        if (d < from)
+            d = new Date(from.getFullYear() + 1, Number(f.dueMonth) - 1, Number(f.dueDom), 12);
+        return d;
+    }
+    return null;
+}
+function dueLabel(f) {
+    const dows = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    if ((f.cadence === "weekly" || f.cadence === "fortnightly") && f.dueDow != null)
+        return dows[Number(f.dueDow)];
+    if (f.cadence === "yearly" && f.dueDom != null && f.dueMonth != null)
+        return `${f.dueDom}/${f.dueMonth}`;
+    if (f.dueDom != null)
+        return `day ${f.dueDom}`;
+    return null;
+}
+function livingBuffer(data) {
+    const c = data.commitments || {};
+    if (c.bufferOverride != null && c.bufferOverride !== "")
+        return Math.max(0, Number(c.bufferOverride) || 0);
+    const from = new Date();
+    from.setHours(0, 0, 0, 0);
+    const pay = nextPayDate(data, from);
+    let dated = 0, estimate = 0;
+    (data.fixed || []).forEach((f) => {
+        const nb = nextBillDate(f, from);
+        if (nb) {
+            if (nb <= pay)
+                dated += Number(f.amount || 0);
+        } // exact: due before next pay
+        else
+            estimate += toWeeklyAmt(f.amount, f.cadence); // undated → weekly estimate
+    });
+    return dated + estimate;
+}
+function commitmentsSummary(data) {
+    const currentCash = computeAccounts(data).total;
+    const projects = (data.commitments?.projects || []).filter((p) => !p.done);
+    const reserved = projects.reduce((s, p) => s + Number(p.allocated || 0), 0);
+    const buffer = livingBuffer(data);
+    return { currentCash, reserved, buffer, freeCash: currentCash - reserved - buffer, projects };
+}
+function feasibility(data) {
+    const weekly = Number(data.commitments?.weeklySurplus || 0);
+    const active = (data.commitments?.projects || []).filter((p) => !p.done);
+    const rank = { must: 0, need: 1, want: 2 };
+    const order = [...active].sort((a, b) => ((rank[a.priority] ?? 1) - (rank[b.priority] ?? 1)) ||
+        (new Date(a.due || "2999-12-31") - new Date(b.due || "2999-12-31")));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    let weekCursor = 0;
+    const res = {};
+    order.forEach((p) => {
+        const need = Math.max(0, Number(p.target || 0) - Number(p.allocated || 0));
+        const weeksNeeded = weekly > 0 ? need / weekly : (need > 0 ? Infinity : 0);
+        if (weeksNeeded !== Infinity)
+            weekCursor += weeksNeeded;
+        const fundedDate = weeksNeeded === Infinity ? null : new Date(today.getTime() + weekCursor * 7 * DAY_MS);
+        const dueDay = p.due ? new Date(p.due + "T00:00:00") : null;
+        const due = p.due ? new Date(p.due + "T23:59:59") : null;
+        const weeksLeft = dueDay ? Math.max(1, Math.ceil((dueDay - today) / (7 * DAY_MS))) : null;
+        const perPay = (weeksLeft && need > 0) ? need / weeksLeft : 0;
+        let status = "green", note = "On track";
+        if (need <= 0) {
+            status = "green";
+            note = "Funded";
+        }
+        else if (weeksNeeded === Infinity) {
+            status = "red";
+            note = "Set a baseline";
+        }
+        else if (due) {
+            const marginDays = (due - fundedDate) / DAY_MS;
+            if (fundedDate <= due && marginDays >= 7) {
+                status = "green";
+                note = "On track";
+            }
+            else if (fundedDate <= due) {
+                status = "orange";
+                note = "Tight";
+            }
+            else {
+                status = p.priority === "must" ? "red" : "orange";
+                note = p.priority === "must" ? "Won't make the date" : "Push the date";
+            }
+        }
+        res[p.id] = { status, note, need, fundedDate, weeksLeft, perPay };
+    });
+    return res;
+}
+function weeklyPlan(data) {
+    const c = data.commitments || {};
+    const baseline = Number(c.weeklySurplus || 0);
+    const uberMax = Number(c.uberMax || 0);
+    const active = (c.projects || []).filter((p) => !p.done);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    let required = 0, mustNoDate = false;
+    active.filter((p) => p.priority === "must").forEach((p) => {
+        const need = Math.max(0, Number(p.target || 0) - Number(p.allocated || 0));
+        if (need <= 0)
+            return;
+        if (!p.due) {
+            mustNoDate = true;
+            return;
+        }
+        const due = new Date(p.due + "T00:00:00");
+        const weeksLeft = Math.max(1, Math.ceil((due - today) / (7 * DAY_MS)));
+        required += need / weeksLeft;
+    });
+    const uberPush = Math.max(0, required - baseline);
+    let status = "green", msg = "";
+    if (required <= 0) {
+        status = "green";
+        msg = "No hard deadlines to fund this week — you're clear.";
+    }
+    else if (uberPush <= 0) {
+        status = "green";
+        msg = "On track — your baseline covers your Must goals. Extra Uber just gets you ahead.";
+    }
+    else if (uberPush <= uberMax) {
+        status = "orange";
+        msg = `Do about ${fmt(uberPush)} extra on Uber this week to stay on track.`;
+    }
+    else {
+        status = "red";
+        msg = `Even at your Uber max (${fmt(uberMax)}/wk) you're short ${fmt(uberPush - uberMax)}/wk — push a flexible goal or a deadline.`;
+    }
+    return { required, baseline, uberMax, uberPush, status, msg, mustNoDate };
+}
+function Commitments({ data, update }) {
+    const s = commitmentsSummary(data);
+    const feas = feasibility(data);
+    const plan = weeklyPlan(data);
+    const c = data.commitments || {};
+    const [adding, setAdding] = useState(false);
+    const [openId, setOpenId] = useState(null);
+    const [nm, setNm] = useState(""), [tg, setTg] = useState(""), [due, setDue] = useState(""), [pri, setPri] = useState("must"), [ic, setIc] = useState("📌"), [alloc0, setAlloc0] = useState("");
+    const [allocAmt, setAllocAmt] = useState("");
+    const icons = ["📌", "🦷", "🛂", "🧾", "🚗", "🛋", "🏖️", "🏠", "💻", "✈️"];
+    const dot = { green: C.green, orange: C.gold, red: C.red };
+    const dotBg = { green: `${C.green}18`, orange: `${C.gold}18`, red: `${C.red}18` };
+    const priMeta = { must: { l: "MUST", c: C.red }, need: { l: "NEED", c: C.gold }, want: { l: "WANT", c: C.green } };
+    const inp = { width: "100%", boxSizing: "border-box", background: C.bgCardHi, border: `1px solid ${C.line}`, borderRadius: 10, color: C.text, fontSize: 14, padding: "10px 12px", fontFamily: "inherit", outline: "none" };
+    const mBtn = (bg) => ({ padding: "10px 14px", borderRadius: 10, border: "none", background: bg, color: "#fff", fontWeight: 700, fontSize: 13.5, fontFamily: "inherit", cursor: "pointer" });
+    const addProject = () => {
+        if (!nm || !Number(tg))
+            return;
+        update((d) => { var _a; (_a = (d.commitments || (d.commitments = { projects: [] }))).projects || (_a.projects = []); d.commitments.projects.unshift({ id: uid(), name: nm, icon: ic, target: Number(tg), due: due || null, allocated: Math.max(0, Number(alloc0) || 0), priority: pri, done: false, createdAt: todayKey() }); });
+        setNm("");
+        setTg("");
+        setDue("");
+        setPri("must");
+        setIc("📌");
+        setAlloc0("");
+        setAdding(false);
+    };
+    const allocate = (id) => { const v = Number(allocAmt); if (!v)
+        return; update((d) => { const p = d.commitments.projects.find((x) => x.id === id); if (p)
+        p.allocated = Math.max(0, Number(p.allocated || 0) + v); }); setAllocAmt(""); };
+    const spendFrom = (id) => {
+        update((d) => {
+            const p = d.commitments.projects.find((x) => x.id === id);
+            if (!p)
+                return;
+            const amt = Math.max(0, Number(p.allocated || 0));
+            if (amt > 0)
+                (d.spend || (d.spend = [])).unshift({ id: uid(), name: p.name, amount: amt, cat: "Other", account: "checking", date: todayKey(), ts: nowTs(), note: "Spend from project: " + p.name });
+            p.done = true;
+        });
+        setOpenId(null);
+    };
+    const delProject = (id) => { update((d) => { d.commitments.projects = d.commitments.projects.filter((x) => x.id !== id); }); setOpenId(null); };
+    const setSurplus = (v) => update((d) => { (d.commitments || (d.commitments = { projects: [] })).weeklySurplus = Math.max(0, Number(v) || 0); });
+    const setUberMax = (v) => update((d) => { (d.commitments || (d.commitments = { projects: [] })).uberMax = Math.max(0, Number(v) || 0); });
+    const setPayday = (n) => update((d) => { (d.commitments || (d.commitments = { projects: [] })).paydayDow = n; });
+    return (React.createElement(React.Fragment, null,
+        React.createElement(SectionTitle, null, "Upcoming Commitments"),
+        React.createElement(Card, null,
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" } },
+                React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: 0.5, color: C.textFaint, textTransform: "uppercase" } }, "Current Cash"),
+                React.createElement("span", { style: { fontSize: 18, fontWeight: 800, color: C.text } }, fmt(s.currentCash))),
+            s.projects.some((p) => p.priority === "must") && (React.createElement("div", { style: { marginTop: 12, background: dotBg[plan.status], border: `1px solid ${dot[plan.status]}55`, borderRadius: 12, padding: "10px 12px" } },
+                React.createElement("div", { style: { display: "flex", alignItems: "flex-start", gap: 8 } },
+                    React.createElement("span", { style: { width: 9, height: 9, borderRadius: 99, background: dot[plan.status], flexShrink: 0, marginTop: 4 } }),
+                    React.createElement("span", { style: { fontSize: 12.5, fontWeight: 600, color: C.text, lineHeight: 1.35 } }, plan.msg)),
+                plan.required > 0 && React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 5 } },
+                    "Need ",
+                    fmt(plan.required),
+                    "/wk for Must goals \u00B7 baseline ",
+                    fmt(plan.baseline),
+                    "/wk",
+                    plan.uberPush > 0 ? ` · gap ${fmt(plan.uberPush)}` : ""))),
+            React.createElement("div", { style: { marginTop: 10 } },
+                s.projects.length === 0 && React.createElement(Empty, null, "No commitments yet. Add your first project below."),
+                s.projects.map((p) => {
+                    const st = feas[p.id] || { status: "green", note: "", need: 0 };
+                    const pct = p.target > 0 ? Math.min(100, (Number(p.allocated || 0) / p.target) * 100) : 0;
+                    const open = openId === p.id;
+                    return (React.createElement("div", { key: p.id, style: { padding: "11px 0", borderTop: `1px solid ${C.line}` } },
+                        React.createElement("div", { onClick: () => { setOpenId(open ? null : p.id); setAllocAmt(""); }, style: { cursor: "pointer" } },
+                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 } },
+                                React.createElement("span", { style: { fontSize: 14.5, fontWeight: 600 } },
+                                    React.createElement("span", { style: { display: "inline-block", width: 8, height: 8, borderRadius: 99, background: dot[st.status], marginRight: 8, verticalAlign: "middle" } }),
+                                    p.icon,
+                                    " ",
+                                    p.name,
+                                    React.createElement("span", { style: { color: (priMeta[p.priority] || priMeta.need).c, fontSize: 10, fontWeight: 800, marginLeft: 6, letterSpacing: 0.5 } }, (priMeta[p.priority] || priMeta.need).l)),
+                                React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: C.textDim } },
+                                    fmt(p.allocated || 0),
+                                    " / ",
+                                    fmt(p.target))),
+                            React.createElement("div", { style: { height: 7, background: C.bgCardHi, borderRadius: 99, overflow: "hidden" } },
+                                React.createElement("div", { style: { width: `${Math.max(2, pct)}%`, height: "100%", background: dot[st.status], borderRadius: 99, transition: "width .5s cubic-bezier(.4,0,.2,1)" } })),
+                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textFaint, marginTop: 6 } },
+                                React.createElement("span", null,
+                                    "Need ",
+                                    fmt(st.need),
+                                    st.perPay > 0 ? ` · ${fmt(st.perPay)}/pay` : "",
+                                    p.due ? " · by " + shortDate(p.due) : ""),
+                                React.createElement("span", { style: { color: dot[st.status], fontWeight: 700 } }, st.note))),
+                        open && (React.createElement("div", { style: { marginTop: 10, background: C.bgCardHi, borderRadius: 12, padding: 12 } },
+                            st.need > 0 && st.weeksLeft && React.createElement("div", { style: { fontSize: 11.5, color: C.text, marginBottom: 10, lineHeight: 1.4 } },
+                                "\uD83D\uDCA1 Allocate ",
+                                React.createElement("b", null,
+                                    fmt(st.perPay),
+                                    "/pay"),
+                                " for ",
+                                st.weeksLeft,
+                                " more pay",
+                                st.weeksLeft > 1 ? "s" : "",
+                                " to hit ",
+                                fmt(p.target),
+                                " by ",
+                                shortDate(p.due),
+                                "."),
+                            st.need > 0 && !st.weeksLeft && React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginBottom: 10, lineHeight: 1.4 } },
+                                "Still need ",
+                                fmt(st.need),
+                                ". Add a due date to get a per-pay target."),
+                            React.createElement("div", { style: { display: "flex", gap: 8 } },
+                                React.createElement("input", { value: allocAmt, inputMode: "decimal", placeholder: "Allocate $", onChange: (e) => setAllocAmt(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, flex: 1 } }),
+                                React.createElement("button", { onClick: () => allocate(p.id), style: mBtn(C.blue) }, "Add")),
+                            React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
+                                React.createElement("button", { onClick: () => spendFrom(p.id), style: { ...mBtn(C.green), flex: 1 } }, "Spend from project"),
+                                React.createElement("button", { onClick: () => delProject(p.id), style: { ...mBtn("transparent"), border: `1px solid ${C.line}`, color: C.red } }, "Delete")),
+                            React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 8, lineHeight: 1.4 } }, "Allocating just reserves cash \u2014 money stays in your account. \u201CSpend from project\u201D logs the spend and closes it.")))));
+                })),
+            React.createElement("div", { style: { borderTop: `2px solid ${C.line}`, marginTop: 12, paddingTop: 10 } },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "5px 0" } },
+                    React.createElement("span", { style: { fontSize: 12, color: C.textDim } }, "Reserved for bills"),
+                    React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: C.textDim } }, fmt(s.buffer))),
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "5px 0" } },
+                    React.createElement("span", { style: { fontSize: 12, color: C.textDim } }, "Reserved for goals"),
+                    React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: C.textDim } }, fmt(s.reserved))),
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginTop: 8 } },
+                    React.createElement("span", { style: { fontSize: 12, fontWeight: 800, letterSpacing: 0.6, color: s.freeCash < 0 ? C.red : C.green, textTransform: "uppercase" } }, "Free Cash"),
+                    React.createElement("span", { style: { fontSize: 26, fontWeight: 800, color: s.freeCash < 0 ? C.red : C.green } }, fmt(s.freeCash)))),
+            s.freeCash < 0 && React.createElement("div", { style: { fontSize: 11.5, color: C.red, marginTop: 8, fontWeight: 600 } }, "You've committed more than you have \u2014 push a flexible project or lower an allocation."),
+            !adding ? (React.createElement("button", { onClick: () => setAdding(true), style: { ...mBtn(C.blue), width: "100%", marginTop: 12 } }, "\uFF0B New project")) : (React.createElement("div", { style: { marginTop: 12, background: C.bgCardHi, borderRadius: 12, padding: 12 } },
+                React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 } }, icons.map((e) => React.createElement("button", { key: e, onClick: () => setIc(e), style: { fontSize: 18, padding: "4px 8px", borderRadius: 8, border: `1px solid ${ic === e ? C.blue : C.line}`, background: ic === e ? C.blue : "transparent", cursor: "pointer" } }, e))),
+                React.createElement("input", { value: nm, placeholder: "Project name", onChange: (e) => setNm(e.target.value), style: { ...inp, marginBottom: 8 } }),
+                React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
+                    React.createElement("input", { value: tg, inputMode: "decimal", placeholder: "Target $", onChange: (e) => setTg(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, flex: 1 } }),
+                    React.createElement("input", { value: alloc0, inputMode: "decimal", placeholder: "Already $", onChange: (e) => setAlloc0(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, flex: 1 } })),
+                React.createElement("input", { type: "date", value: due, onChange: (e) => setDue(e.target.value), style: { ...inp, marginBottom: 8, colorScheme: "dark" } }),
+                React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } }, [["must", "Must"], ["need", "Need"], ["want", "Want"]].map(([v, l]) => (React.createElement("button", { key: v, onClick: () => setPri(v), style: { flex: 1, padding: "10px 0", borderRadius: 10, border: `1px solid ${pri === v ? priMeta[v].c : C.line}`, background: pri === v ? priMeta[v].c : "transparent", color: pri === v ? "#fff" : C.textDim, fontWeight: 700, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer" } }, l)))),
+                React.createElement("div", { style: { display: "flex", gap: 8 } },
+                    React.createElement("button", { onClick: addProject, style: { ...mBtn(C.green), flex: 1 } }, "Add project"),
+                    React.createElement("button", { onClick: () => setAdding(false), style: { ...mBtn("transparent"), border: `1px solid ${C.line}`, color: C.textDim } }, "Cancel")))),
+            React.createElement("div", { style: { borderTop: `1px solid ${C.line}`, marginTop: 14, paddingTop: 12 } },
+                React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 10 } },
+                    React.createElement("span", { style: { fontSize: 11.5, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Weekly baseline \u2014 reliable set-aside/week (main job + Uber minimum)"),
+                    React.createElement("input", { value: c.weeklySurplus || "", inputMode: "decimal", placeholder: "$0", onChange: (e) => setSurplus(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, width: 92, flex: "none", textAlign: "right" } })),
+                React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 12 } },
+                    React.createElement("span", { style: { fontSize: 11.5, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Uber ceiling \u2014 realistic max extra/week"),
+                    React.createElement("input", { value: c.uberMax || "", inputMode: "decimal", placeholder: "$0", onChange: (e) => setUberMax(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, width: 92, flex: "none", textAlign: "right" } })),
+                React.createElement("div", { style: { fontSize: 11.5, color: C.textDim, marginBottom: 6 } }, "Payday"),
+                React.createElement("div", { style: { display: "flex", gap: 5 } }, [["Mo", 1], ["Tu", 2], ["We", 3], ["Th", 4], ["Fr", 5], ["Sa", 6], ["Su", 0]].map(([l, n]) => (React.createElement("button", { key: n, onClick: () => setPayday(n), style: { flex: 1, padding: "8px 0", borderRadius: 8, border: `1px solid ${(c.paydayDow ?? 4) === n ? C.blue : C.line}`, background: (c.paydayDow ?? 4) === n ? C.blue : "transparent", color: (c.paydayDow ?? 4) === n ? "#fff" : C.textDim, fontWeight: 700, fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" } }, l))))),
+            React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 10, lineHeight: 1.45 } }, "Free Cash = Current Cash \u2212 bills \u2212 goals = safe to spend today. The banner tells you how much extra Uber to do this week to keep your Must goals on time. Dots: \uD83D\uDFE2 on track \u00B7 \uD83D\uDFE0 tight \u00B7 \uD83D\uDD34 won't make it."))));
+}
+function WhatIf({ data }) {
+    const [open, setOpen] = useState(false);
+    const [mode, setMode] = useState("expense");
+    const [amount, setAmount] = useState("");
+    const [name, setName] = useState(""), [target, setTarget] = useState(""), [due, setDue] = useState(""), [pri, setPri] = useState("need");
+    const s0 = commitmentsSummary(data);
+    const p0 = weeklyPlan(data);
+    const dot = { green: C.green, orange: C.gold, red: C.red };
+    const inp = { width: "100%", boxSizing: "border-box", background: C.bgCardHi, border: `1px solid ${C.line}`, borderRadius: 10, color: C.text, fontSize: 14, padding: "10px 12px", fontFamily: "inherit", outline: "none" };
+    const mBtn = (bg) => ({ padding: "10px 14px", borderRadius: 10, border: "none", background: bg, color: "#fff", fontWeight: 700, fontSize: 13.5, fontFamily: "inherit", cursor: "pointer" });
+    let afterFree = s0.freeCash, pAfter = p0, hypo = null;
+    if (mode === "expense") {
+        afterFree = s0.freeCash - (Number(amount) || 0);
+    }
+    else {
+        const projects = [...(data.commitments?.projects || []), { id: "__wi", name: name || "New goal", icon: "❓", target: Number(target) || 0, allocated: 0, due: due || null, priority: pri, done: false }];
+        const d2 = { ...data, commitments: { ...(data.commitments || {}), projects } };
+        pAfter = weeklyPlan(d2);
+        hypo = feasibility(d2)["__wi"];
+    }
+    const reset = () => { setOpen(false); setAmount(""); setName(""); setTarget(""); setDue(""); setPri("need"); };
+    return (React.createElement(React.Fragment, null,
+        React.createElement(SectionTitle, null, "What if?"),
+        React.createElement(Card, null, !open ? (React.createElement("button", { onClick: () => setOpen(true), style: { ...mBtn(C.blue), width: "100%" } }, "Test a purchase or goal")) : (React.createElement(React.Fragment, null,
+            React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 12 } }, [["expense", "One-off spend"], ["goal", "New goal"]].map(([v, l]) => (React.createElement("button", { key: v, onClick: () => setMode(v), style: { flex: 1, padding: "9px 0", borderRadius: 10, border: `1px solid ${mode === v ? C.blue : C.line}`, background: mode === v ? C.blue : "transparent", color: mode === v ? "#fff" : C.textDim, fontWeight: 700, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer" } }, l)))),
+            mode === "expense" ? (React.createElement("input", { value: amount, inputMode: "decimal", placeholder: "Amount $ (e.g. 1500)", onChange: (e) => setAmount(e.target.value.replace(/[^0-9.]/g, "")), style: inp })) : (React.createElement(React.Fragment, null,
+                React.createElement("input", { value: name, placeholder: "What is it? (e.g. Furniture)", onChange: (e) => setName(e.target.value), style: { ...inp, marginBottom: 8 } }),
+                React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
+                    React.createElement("input", { value: target, inputMode: "decimal", placeholder: "Cost $", onChange: (e) => setTarget(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, flex: 1 } }),
+                    React.createElement("input", { type: "date", value: due, onChange: (e) => setDue(e.target.value), style: { ...inp, flex: 1, colorScheme: "dark" } })),
+                React.createElement("div", { style: { display: "flex", gap: 8 } }, [["must", "Must"], ["need", "Need"], ["want", "Want"]].map(([v, l]) => (React.createElement("button", { key: v, onClick: () => setPri(v), style: { flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${pri === v ? C.blue : C.line}`, background: pri === v ? C.blue : "transparent", color: pri === v ? "#fff" : C.textDim, fontWeight: 700, fontSize: 12, fontFamily: "inherit", cursor: "pointer" } }, l)))))),
+            React.createElement("div", { style: { marginTop: 14, background: C.bgCardHi, borderRadius: 12, padding: 12 } },
+                React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, letterSpacing: 0.5, color: C.textFaint, textTransform: "uppercase", marginBottom: 8 } }, "Impact"),
+                mode === "expense" ? (React.createElement(React.Fragment, null,
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" } },
+                        React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Free Cash"),
+                        React.createElement("span", { style: { fontSize: 14 } },
+                            React.createElement("span", { style: { color: C.textFaint } },
+                                fmt(s0.freeCash),
+                                " \u2192"),
+                            " ",
+                            React.createElement("b", { style: { color: afterFree < 0 ? C.red : C.green, fontSize: 16 } }, fmt(afterFree)))),
+                    Number(amount) > 0 && afterFree < 0 && React.createElement("div", { style: { fontSize: 11.5, color: C.red, marginTop: 8, fontWeight: 600 } },
+                        "This puts you ",
+                        fmt(-afterFree),
+                        " over your commitments \u2014 it would eat into bills or goals."),
+                    Number(amount) > 0 && afterFree >= 0 && React.createElement("div", { style: { fontSize: 11.5, color: C.green, marginTop: 8, fontWeight: 600 } },
+                        "Safe \u2014 you'd still have ",
+                        fmt(afterFree),
+                        " free after this."))) : (React.createElement(React.Fragment, null,
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 6 } },
+                        React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Uber push / week"),
+                        React.createElement("span", { style: { fontSize: 13.5 } },
+                            React.createElement("span", { style: { color: C.textFaint } },
+                                fmt(p0.uberPush),
+                                " \u2192"),
+                            " ",
+                            React.createElement("b", { style: { color: dot[pAfter.status] } }, fmt(pAfter.uberPush)))),
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between" } },
+                        React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Must needed / week"),
+                        React.createElement("span", { style: { fontSize: 13.5 } },
+                            React.createElement("span", { style: { color: C.textFaint } },
+                                fmt(p0.required),
+                                " \u2192"),
+                            " ",
+                            React.createElement("b", { style: { color: C.text } }, fmt(pAfter.required)))),
+                    hypo && Number(target) > 0 && React.createElement("div", { style: { fontSize: 12, color: dot[hypo.status], marginTop: 8, fontWeight: 600 } },
+                        hypo.status === "green" ? "✅ Fits — funded on time" : hypo.status === "orange" ? "🟠 Tight — you'd push Uber or the date" : "🔴 Won't make the date at your baseline",
+                        hypo.perPay > 0 ? ` · ${fmt(hypo.perPay)}/pay` : ""),
+                    React.createElement("div", { style: { fontSize: 11.5, color: dot[pAfter.status], marginTop: 6, fontWeight: 600 } }, pAfter.msg)))),
+            React.createElement("button", { onClick: reset, style: { ...mBtn("transparent"), border: `1px solid ${C.line}`, color: C.textDim, width: "100%", marginTop: 10 } }, "Close \u00B7 nothing saved"))))));
+}
 function Home({ data, update, setTab, openHistory, openWork }) {
     const t = useTotals(data);
     const ws = workSummary(data);
@@ -738,6 +1148,8 @@ function Home({ data, update, setTab, openHistory, openWork }) {
     const totalCat = cats.reduce((s, [, v]) => s + v, 0) || 1;
     return (React.createElement("div", { style: { padding: "8px 16px 0" } },
         React.createElement(Accounts, { data: data, update: update }),
+        React.createElement(Commitments, { data: data, update: update }),
+        React.createElement(WhatIf, { data: data }),
         React.createElement(SectionTitle, null,
             "Where it goes \u00B7 ",
             monthName(t.curMonth)),
@@ -1615,6 +2027,7 @@ function Fixed({ data, update }) {
                             fmt(f.amount),
                             " ",
                             cadEn(f.cadence),
+                            dueLabel(f) ? ` · due ${dueLabel(f)}` : "",
                             " \u00B7 ",
                             fmt(toMonthly(f.amount, f.cadence)),
                             "/mo")),
@@ -2092,11 +2505,22 @@ function MenuSection({ icon, title, subtitle, children }) {
 }
 function FixedCreator({ data, update }) {
     const [name, setName] = useState(""), [amount, setAmount] = useState(""), [cadence, setCadence] = useState("monthly"), [cat, setCat] = useState(data.categories[0]), [account, setAccount] = useState("checking");
+    const [dueDow, setDueDow] = useState("5"), [dueDom, setDueDom] = useState("1"), [dueMonth, setDueMonth] = useState("1");
     const [close, setClose] = useState(0);
+    const isWeekly = cadence === "weekly" || cadence === "fortnightly";
+    const isYearly = cadence === "yearly";
     const addTpl = () => {
         if (!name || !amount)
             return;
-        update((d) => d.fixed.unshift({ id: uid(), name, amount: Number(amount), cadence, cat, account }));
+        const extra = {};
+        if (isWeekly)
+            extra.dueDow = Number(dueDow);
+        else {
+            extra.dueDom = Math.min(31, Math.max(1, Number(dueDom) || 1));
+            if (isYearly)
+                extra.dueMonth = Math.min(12, Math.max(1, Number(dueMonth) || 1));
+        }
+        update((d) => d.fixed.unshift({ id: uid(), name, amount: Number(amount), cadence, cat, account, ...extra }));
         setName("");
         setAmount("");
     };
@@ -2104,6 +2528,10 @@ function FixedCreator({ data, update }) {
         React.createElement(Field, { label: "Name", value: name, onChange: setName, placeholder: "Rent, WiFi\u2026" }),
         React.createElement(Field, { label: "Amount", value: amount, onChange: setAmount, placeholder: "0", numeric: true, prefix: CURRENCY }),
         React.createElement(Segmented, { label: "Cadence", value: cadence, onChange: setCadence, options: [["weekly", "Wk"], ["fortnightly", "Fn"], ["monthly", "Mo"], ["yearly", "Yr"]] }),
+        isWeekly
+            ? React.createElement(Segmented, { label: "Due day", value: dueDow, onChange: setDueDow, options: [["1", "Mo"], ["2", "Tu"], ["3", "We"], ["4", "Th"], ["5", "Fr"], ["6", "Sa"], ["0", "Su"]] })
+            : React.createElement(Field, { label: isYearly ? "Due day (1–31)" : "Due day of month (1–31)", value: dueDom, onChange: setDueDom, placeholder: "1", numeric: true }),
+        isYearly && React.createElement(Field, { label: "Due month (1\u201312)", value: dueMonth, onChange: setDueMonth, placeholder: "1", numeric: true }),
         React.createElement(Picker, { label: "Category", value: cat, onChange: setCat, options: data.categories }),
         React.createElement(AccountToggle, { value: account, onChange: setAccount }),
         React.createElement(AddBtn, { onClick: () => { const ok = name && amount; addTpl(); if (ok)
