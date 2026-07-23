@@ -42,8 +42,52 @@ const TAB_ON = { home: C.text, income: C.green, spend: C.red, tax: C.gold, plan:
 const DomainCtx = React.createContext(C.textFaint);
 const CURRENCY = "$";
 const STORAGE_KEY = "lucaFinanceOS_v1"; // unchanged → data persists
+// ── Auto-backup: rolling local snapshots, survive app close. Never touches STORAGE_KEY.
+const SNAP_KEY = "lucaFinanceOS_v1__snaps";
+const SNAP_MAX = 6;
+function loadSnaps() {
+    try {
+        const raw = localStorage.getItem(SNAP_KEY);
+        const l = raw ? JSON.parse(raw) : [];
+        return Array.isArray(l) ? l : [];
+    }
+    catch {
+        return [];
+    }
+}
+function pushSnapshot(data) {
+    if (!data)
+        return;
+    let json;
+    try {
+        json = JSON.stringify(data);
+    }
+    catch {
+        return;
+    }
+    if (!json || json.length < 20)
+        return;
+    const list = loadSnaps();
+    const last = list[list.length - 1];
+    if (last && last.json === json)
+        return; // nothing changed
+    list.push({ ts: Date.now(), json });
+    while (list.length > SNAP_MAX)
+        list.shift();
+    for (let i = 0; i < SNAP_MAX; i++) { // quota-safe: drop oldest until it fits
+        try {
+            localStorage.setItem(SNAP_KEY, JSON.stringify(list));
+            return;
+        }
+        catch {
+            if (list.length <= 1)
+                return;
+            list.shift();
+        }
+    }
+}
 const LOCALE = "en-AU";
-const APP_VERSION = "v9.1";
+const APP_VERSION = "v9.3";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "Luca", started: new Date().toISOString() },
@@ -178,15 +222,34 @@ function undoLabel(a, b) {
         return "Changed plan settings";
     return "Edit";
 }
-function UndoPanel({ stack, current, onRestore, onClose }) {
+function UndoPanel({ stack, current, onRestore, onRestoreSnap, onClose }) {
     const entries = stack.map((e, i) => ({ ...e, i, after: stack[i + 1] ? stack[i + 1].before : current })).reverse();
     const timeStr = (ts) => { const d = new Date(ts); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); };
+    const snaps = loadSnaps().slice().reverse();
+    const snapWhen = (ts) => {
+        const d = new Date(ts), now = new Date();
+        const sameDay = d.toDateString() === now.toDateString();
+        const yest = new Date(now.getTime() - 86400000).toDateString() === d.toDateString();
+        const t = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        return sameDay ? `Today ${t}` : yest ? `Yesterday ${t}` : `${d.getDate()}/${d.getMonth() + 1} ${t}`;
+    };
+    const snapSize = (j) => `${Math.round((j || "").length / 1024)} KB`;
     return (React.createElement("div", { onClick: onClose, style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
         React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { background: C.bgCard, width: "100%", maxWidth: 560, maxHeight: "80vh", borderRadius: "18px 18px 0 0", padding: 18, overflowY: "auto" } },
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 } },
                 React.createElement("span", { style: { fontSize: 16, fontWeight: 800, color: C.text } }, "\u21B6 Undo / History"),
                 React.createElement("button", { onClick: onClose, style: { background: "transparent", border: "none", color: C.textFaint, fontSize: 20, cursor: "pointer" } }, "\u2715")),
-            React.createElement("div", { style: { fontSize: 11, color: C.textFaint, marginBottom: 14, lineHeight: 1.4 } }, "Your recent changes this session. Tap Restore to roll back to the state just before that action. (Cleared when you close the app.)"),
+            React.createElement("div", { style: { fontSize: 11, color: C.textFaint, marginBottom: 14, lineHeight: 1.4 } }, "Auto-backups survive closing the app. Session changes let you undo a single action."),
+            React.createElement("div", { style: { fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, color: C.green, textTransform: "uppercase", marginBottom: 4 } }, "\uD83D\uDEDF Auto-backups"),
+            snaps.length === 0 && React.createElement("div", { style: { color: C.textFaint, fontSize: 12.5, padding: "10px 0" } }, "No auto-backup yet \u2014 one is taken now and every few minutes."),
+            snaps.map((s, k) => (React.createElement("div", { key: s.ts, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 0", borderTop: k === 0 ? "none" : `1px solid ${C.line}` } },
+                React.createElement("div", null,
+                    React.createElement("div", { style: { fontSize: 13.5, fontWeight: 600, color: C.text } },
+                        snapWhen(s.ts),
+                        k === 0 ? " · newest" : ""),
+                    React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 2 } }, snapSize(s.json))),
+                React.createElement("button", { onClick: () => { onRestoreSnap(s.json); onClose(); }, style: { background: "transparent", border: `1px solid ${C.green}`, color: C.green, borderRadius: 9, padding: "7px 14px", fontSize: 12.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer" } }, "Restore")))),
+            React.createElement("div", { style: { fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, color: C.textFaint, textTransform: "uppercase", margin: "18px 0 4px" } }, "\u21B6 This session"),
             entries.length === 0 && React.createElement("div", { style: { color: C.textFaint, fontSize: 13, padding: "20px 0", textAlign: "center" } }, "No changes yet this session."),
             entries.map((e, k) => (React.createElement("div", { key: e.i, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderTop: k === 0 ? "none" : `1px solid ${C.line}` } },
                 React.createElement("div", null,
@@ -236,6 +299,18 @@ function App() {
         catch { } })();
     }, [data, loaded]);
     useEffect(() => { dataRef.current = data; }, [data]);
+    // auto-backup: snapshot on load, every 5 min, and whenever the app goes to background
+    useEffect(() => {
+        if (!loaded || !data)
+            return;
+        pushSnapshot(data);
+        const iv = setInterval(() => pushSnapshot(dataRef.current), 300000);
+        const onHide = () => { if (document.visibilityState === "hidden")
+            pushSnapshot(dataRef.current); };
+        document.addEventListener("visibilitychange", onHide);
+        window.addEventListener("pagehide", onHide);
+        return () => { clearInterval(iv); document.removeEventListener("visibilitychange", onHide); window.removeEventListener("pagehide", onHide); };
+    }, [loaded]);
     // auto day-rollover: re-evaluate "today" on focus + once a minute
     useEffect(() => {
         const tick = () => setNow(Date.now());
@@ -259,6 +334,17 @@ function App() {
             setUndoTick((t) => t + 1);
         }
         setData((d) => { const c = structuredClone(d); fn(c); return c; });
+    }, []);
+    const restoreSnapshot = useCallback((json) => {
+        try {
+            const parsed = migrate(JSON.parse(json));
+            if (dataRef.current) {
+                undoRef.current.push({ before: dataRef.current, ts: Date.now() });
+                setUndoTick((t) => t + 1);
+            }
+            setData(parsed);
+        }
+        catch { }
     }, []);
     const undoRestore = useCallback((idx) => {
         const st = undoRef.current;
@@ -338,7 +424,7 @@ function App() {
             "\uD83C\uDFC6 New record",
             recordFlash.pct != null ? ` · previous beaten by ${recordFlash.pct}%` : "")),
         histFilter && React.createElement(History, { data: data, update: update, preset: histFilter, onClose: () => setHistFilter(null) }),
-        undoOpen && React.createElement(UndoPanel, { stack: undoRef.current, current: data, onRestore: undoRestore, onClose: () => setUndoOpen(false) }),
+        undoOpen && React.createElement(UndoPanel, { stack: undoRef.current, current: data, onRestore: undoRestore, onRestoreSnap: restoreSnapshot, onClose: () => setUndoOpen(false) }),
         workOpen && React.createElement(WorkSessionForm, { data: data, update: update, showToast: showToast, onClose: () => setWorkOpen(false) })));
 }
 function migrate(d) {
@@ -1014,41 +1100,45 @@ function weeklyPlan(data) {
     const active = (c.projects || []).filter((p) => !p.done);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    let required = 0, mustNoDate = false;
-    active.filter((p) => p.priority === "must").forEach((p) => {
+    let required = 0, requiredAll = 0, mustNoDate = false;
+    active.forEach((p) => {
         const need = Math.max(0, Number(p.target || 0) - Number(p.allocated || 0));
         if (need <= 0)
             return;
         if (!p.due) {
-            mustNoDate = true;
+            if (p.priority === "must")
+                mustNoDate = true;
             return;
         }
         const due = new Date(p.due + "T00:00:00");
         const weeksLeft = Math.max(1, Math.ceil((due - today) / (7 * DAY_MS)));
-        required += need / weeksLeft;
+        const per = need / weeksLeft;
+        requiredAll += per;
+        if (p.priority === "must")
+            required += per;
     });
-    const uberPush = Math.max(0, required - baseline);
+    const uberPush = Math.max(0, required - baseline); // Must-critical gap
+    const gapAll = Math.max(0, requiredAll - baseline); // gap to fund everything on time
     const uberRate = uberRatePerHour(data);
-    const uberHours = uberRate > 0 ? uberPush / uberRate : null;
-    const hrTxt = (uberHours != null && uberPush > 0) ? ` (~${Math.ceil(uberHours)} h at ${fmt(uberRate)}/h)` : "";
+    const uberHours = uberRate > 0 ? gapAll / uberRate : null;
     let status = "green", msg = "";
-    if (required <= 0) {
-        status = "green";
-        msg = "No hard deadlines to fund this week — you're clear.";
+    if (uberPush > 0 && uberPush > uberMax) {
+        status = "red";
+        msg = `Short ${fmt(uberPush - uberMax)}/wk on your Must goals — push a date or a goal.`;
     }
-    else if (uberPush <= 0) {
-        status = "green";
-        msg = "On track — your baseline covers your Must goals. Extra Uber just gets you ahead.";
-    }
-    else if (uberPush <= uberMax) {
+    else if (gapAll > 0) {
         status = "orange";
-        msg = `Do about ${fmt(uberPush)} extra on Uber this week${hrTxt} to stay on track.`;
+        msg = (uberHours != null && uberHours > 0) ? `Add ~${Math.ceil(uberHours)}h of Uber this week to stay on track.` : `Find ${fmt(gapAll)} more this week to stay on track.`;
+    }
+    else if (requiredAll <= 0) {
+        status = "green";
+        msg = "Nothing due — you're clear this week.";
     }
     else {
-        status = "red";
-        msg = `Even at your Uber max (${fmt(uberMax)}/wk) you're short ${fmt(uberPush - uberMax)}/wk — push a flexible goal or a deadline.`;
+        status = "green";
+        msg = "Your job covers everything this week.";
     }
-    return { required, baseline, uberMax, uberPush, status, msg, mustNoDate, uberRate, uberHours };
+    return { required, requiredAll, baseline, uberMax, uberPush, gapAll, status, msg, mustNoDate, uberRate, uberHours };
 }
 function Commitments({ data, update }) {
     const s = commitmentsSummary(data);
@@ -1093,114 +1183,111 @@ function Commitments({ data, update }) {
         setOpenId(null);
     };
     const delProject = (id) => { update((d) => { d.commitments.projects = d.commitments.projects.filter((x) => x.id !== id); }); setOpenId(null); };
-    const setSurplus = (v) => update((d) => { (d.commitments || (d.commitments = { projects: [] })).weeklySurplus = Math.max(0, Number(v) || 0); });
-    const setUberMax = (v) => update((d) => { (d.commitments || (d.commitments = { projects: [] })).uberMax = Math.max(0, Number(v) || 0); });
-    const setPayday = (n) => update((d) => { (d.commitments || (d.commitments = { projects: [] })).paydayDow = n; });
+    const statusLabel = { green: "On Track", orange: "Attention", red: "Action Required" };
+    const gap = plan.gapAll;
+    const hrs = plan.uberHours != null ? Math.ceil(plan.uberHours) : null;
     return (React.createElement(React.Fragment, null,
-        React.createElement(SectionTitle, null, "Upcoming Commitments"),
+        React.createElement(SectionTitle, null, "This week"),
         React.createElement(Card, null,
-            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" } },
-                React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: 0.5, color: C.textFaint, textTransform: "uppercase" } }, "Current Cash"),
-                React.createElement("span", { style: { fontSize: 18, fontWeight: 800, color: C.text } }, fmt(s.currentCash))),
-            s.projects.some((p) => p.priority === "must") && (React.createElement("div", { style: { marginTop: 12, background: dotBg[plan.status], border: `1px solid ${dot[plan.status]}55`, borderRadius: 12, padding: "10px 12px" } },
-                React.createElement("div", { style: { display: "flex", alignItems: "flex-start", gap: 8 } },
-                    React.createElement("span", { style: { width: 9, height: 9, borderRadius: 99, background: dot[plan.status], flexShrink: 0, marginTop: 4 } }),
-                    React.createElement("span", { style: { fontSize: 12.5, fontWeight: 600, color: C.text, lineHeight: 1.35 } }, plan.msg)),
-                plan.required > 0 && React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 5 } },
-                    "Must goals: ",
-                    fmt(plan.required),
-                    "/wk \u00B7 baseline ",
-                    fmt(plan.baseline),
-                    "/wk"))),
-            React.createElement("div", { style: { marginTop: 10 } },
-                s.projects.length === 0 && React.createElement(Empty, null, "No commitments yet. Add your first project below."),
-                s.projects.map((p) => {
-                    const st = feas[p.id] || { status: "green", note: "", need: 0 };
-                    const pct = p.target > 0 ? Math.min(100, (Number(p.allocated || 0) / p.target) * 100) : 0;
-                    const open = openId === p.id;
-                    return (React.createElement("div", { key: p.id, style: { padding: "13px 0", borderTop: `1px solid ${C.line}` } },
-                        React.createElement("div", { onClick: () => { setOpenId(open ? null : p.id); setAllocAmt(""); }, style: { cursor: "pointer" } },
-                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 } },
-                                React.createElement("span", { style: { fontSize: 14.5, fontWeight: 600 } },
-                                    React.createElement("span", { style: { display: "inline-block", width: 8, height: 8, borderRadius: 99, background: dot[st.status], marginRight: 8, verticalAlign: "middle" } }),
-                                    p.icon,
-                                    " ",
-                                    p.name,
-                                    React.createElement("span", { style: { color: (priMeta[p.priority] || priMeta.need).c, fontSize: 9.5, fontWeight: 800, marginLeft: 7, letterSpacing: 0.5 } }, (priMeta[p.priority] || priMeta.need).l)),
-                                React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: C.textDim } },
-                                    fmt(p.allocated || 0),
-                                    " / ",
-                                    fmt(p.target))),
-                            React.createElement("div", { style: { height: 6, background: C.bgCardHi, borderRadius: 99, overflow: "hidden" } },
-                                React.createElement("div", { style: { width: `${Math.max(2, pct)}%`, height: "100%", background: dot[st.status], borderRadius: 99, transition: "width .5s cubic-bezier(.4,0,.2,1)" } })),
-                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textFaint, marginTop: 7 } },
-                                React.createElement("span", null,
-                                    st.perPay > 0 ? `${fmt(st.perPay)}/pay` : "Funded",
-                                    p.due ? ` · by ${shortDate(p.due)}` : ""),
-                                st.status !== "green" && React.createElement("span", { style: { color: dot[st.status], fontWeight: 700 } }, st.note))),
-                        open && (React.createElement("div", { style: { marginTop: 10, background: C.bgCardHi, borderRadius: 12, padding: 12 } },
-                            st.need > 0 && st.weeksLeft && React.createElement("div", { style: { fontSize: 11.5, color: C.text, marginBottom: 10, lineHeight: 1.4 } },
-                                "\uD83D\uDCA1 Allocate ",
-                                React.createElement("b", null,
-                                    fmt(st.perPay),
-                                    "/pay"),
-                                " for ",
-                                st.weeksLeft,
-                                " more pay",
-                                st.weeksLeft > 1 ? "s" : "",
-                                " to hit ",
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 } },
+                React.createElement("div", null,
+                    React.createElement("div", { style: { fontSize: 10.5, fontWeight: 800, letterSpacing: 0.7, color: C.textFaint, textTransform: "uppercase" } }, "Set aside this week"),
+                    React.createElement("div", { style: { fontSize: 36, fontWeight: 800, color: C.text, lineHeight: 1.05, marginTop: 6 } }, fmt(plan.requiredAll))),
+                React.createElement("span", { style: { fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: dot[plan.status], background: dotBg[plan.status], border: `1px solid ${dot[plan.status]}44`, borderRadius: 99, padding: "5px 10px", whiteSpace: "nowrap", flexShrink: 0 } }, statusLabel[plan.status])),
+            plan.requiredAll > 0 && (React.createElement("div", { style: { marginTop: 18 } },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "8px 0" } },
+                    React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Job covers"),
+                    React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: C.text } }, fmt(plan.baseline))),
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: `1px solid ${C.line}` } },
+                    React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Still missing"),
+                    React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: gap > 0 ? C.gold : C.green } }, gap > 0 ? fmt(gap) : "—")),
+                gap > 0 && hrs != null && hrs > 0 && (React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: `1px solid ${C.line}` } },
+                    React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Uber needed"),
+                    React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: C.gold } },
+                        "~",
+                        hrs,
+                        " h"))))),
+            React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginTop: 14, lineHeight: 1.4 } }, plan.msg)),
+        React.createElement(Card, null,
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 12 } },
+                React.createElement("div", null,
+                    React.createElement("div", { style: { fontSize: 10.5, fontWeight: 800, letterSpacing: 0.7, color: s.freeCash < 0 ? C.red : C.green, textTransform: "uppercase" } }, "Free cash"),
+                    React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 6 } },
+                        fmt(s.currentCash),
+                        " cash \u00B7 ",
+                        fmt(s.buffer),
+                        " bills \u00B7 ",
+                        fmt(s.reserved),
+                        " goals")),
+                React.createElement("span", { style: { fontSize: 32, fontWeight: 800, color: s.freeCash < 0 ? C.red : C.green, lineHeight: 1 } }, fmt(s.freeCash))),
+            s.freeCash < 0 && React.createElement("div", { style: { fontSize: 11.5, color: C.red, marginTop: 12, fontWeight: 600 } }, "Committed more than you have \u2014 push a goal or lower an allocation.")),
+        React.createElement(SectionTitle, null, "Projects"),
+        React.createElement(Card, null,
+            s.projects.length === 0 && React.createElement(Empty, null, "No projects yet. Tap \uFF0B to add one."),
+            s.projects.map((p, idx) => {
+                const st = feas[p.id] || { status: "green", note: "", need: 0, perPay: 0 };
+                const pct = p.target > 0 ? Math.min(100, (Number(p.allocated || 0) / p.target) * 100) : 0;
+                const open = openId === p.id;
+                return (React.createElement("div", { key: p.id, style: { padding: "15px 0", borderTop: idx === 0 ? "none" : `1px solid ${C.line}` } },
+                    React.createElement("div", { onClick: () => { setOpenId(open ? null : p.id); setAllocAmt(""); }, style: { cursor: "pointer" } },
+                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 9 } },
+                            React.createElement("span", { style: { fontSize: 14.5, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+                                React.createElement("span", { style: { display: "inline-block", width: 7, height: 7, borderRadius: 99, background: dot[st.status], marginRight: 9, verticalAlign: "middle", flexShrink: 0 } }),
+                                p.icon,
+                                " ",
+                                p.name),
+                            React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: C.text, whiteSpace: "nowrap" } }, st.perPay > 0 ? `${fmt(st.perPay)}/pay` : "Funded")),
+                        React.createElement("div", { style: { height: 5, background: C.bgCardHi, borderRadius: 99, overflow: "hidden" } },
+                            React.createElement("div", { style: { width: `${Math.max(2, pct)}%`, height: "100%", background: dot[st.status], borderRadius: 99, transition: "width .5s cubic-bezier(.4,0,.2,1)" } })),
+                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 10.5, color: C.textFaint, marginTop: 8 } },
+                            React.createElement("span", null,
+                                fmt(p.allocated || 0),
+                                " / ",
                                 fmt(p.target),
-                                " by ",
-                                shortDate(p.due),
-                                "."),
-                            st.need > 0 && !st.weeksLeft && React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginBottom: 10, lineHeight: 1.4 } },
-                                "Still need ",
-                                fmt(st.need),
-                                ". Add a due date to get a per-pay target."),
-                            React.createElement("div", { style: { display: "flex", gap: 8 } },
-                                React.createElement("input", { value: allocAmt, inputMode: "decimal", placeholder: "Allocate $", onChange: (e) => setAllocAmt(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, flex: 1 } }),
-                                React.createElement("button", { onClick: () => allocate(p.id), style: mBtn(C.blue) }, "Add")),
-                            React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
-                                React.createElement("button", { onClick: () => spendFrom(p.id), style: { ...mBtn(C.green), flex: 1 } }, "Spend from project"),
-                                React.createElement("button", { onClick: () => delProject(p.id), style: { ...mBtn("transparent"), border: `1px solid ${C.line}`, color: C.red } }, "Delete")),
-                            React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 8, lineHeight: 1.4 } }, "Allocating just reserves cash \u2014 money stays in your account. \u201CSpend from project\u201D logs the spend and closes it.")))));
-                })),
-            React.createElement("div", { style: { borderTop: `2px solid ${C.line}`, marginTop: 12, paddingTop: 10 } },
-                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "5px 0" } },
-                    React.createElement("span", { style: { fontSize: 12, color: C.textDim } }, "Reserved for bills"),
-                    React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: C.textDim } }, fmt(s.buffer))),
-                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "5px 0" } },
-                    React.createElement("span", { style: { fontSize: 12, color: C.textDim } }, "Reserved for goals"),
-                    React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: C.textDim } }, fmt(s.reserved))),
-                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginTop: 8 } },
-                    React.createElement("span", { style: { fontSize: 12, fontWeight: 800, letterSpacing: 0.6, color: s.freeCash < 0 ? C.red : C.green, textTransform: "uppercase" } }, "Free Cash"),
-                    React.createElement("span", { style: { fontSize: 26, fontWeight: 800, color: s.freeCash < 0 ? C.red : C.green } }, fmt(s.freeCash)))),
-            s.freeCash < 0 && React.createElement("div", { style: { fontSize: 11.5, color: C.red, marginTop: 8, fontWeight: 600 } }, "You've committed more than you have \u2014 push a flexible project or lower an allocation."),
-            !adding ? (React.createElement("button", { onClick: () => setAdding(true), style: { ...mBtn(C.blue), width: "100%", marginTop: 12 } }, "\uFF0B New project")) : (React.createElement("div", { style: { marginTop: 12, background: C.bgCardHi, borderRadius: 12, padding: 12 } },
-                React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 } }, icons.map((e) => React.createElement("button", { key: e, onClick: () => setIc(e), style: { fontSize: 18, padding: "4px 8px", borderRadius: 8, border: `1px solid ${ic === e ? C.blue : C.line}`, background: ic === e ? C.blue : "transparent", cursor: "pointer" } }, e))),
+                                p.due ? ` · ${shortDate(p.due)}` : ""),
+                            st.status !== "green" && React.createElement("span", { style: { color: dot[st.status], fontWeight: 700 } }, statusLabel[st.status]))),
+                    open && (React.createElement("div", { style: { marginTop: 12, background: C.bgCardHi, borderRadius: 12, padding: 13 } },
+                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } },
+                            React.createElement("span", { style: { color: (priMeta[p.priority] || priMeta.need).c, fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5 } }, (priMeta[p.priority] || priMeta.need).l),
+                            React.createElement("span", { style: { fontSize: 11, color: C.textFaint } },
+                                "Need ",
+                                fmt(st.need))),
+                        st.need > 0 && st.weeksLeft && React.createElement("div", { style: { fontSize: 11.5, color: C.text, marginBottom: 11, lineHeight: 1.4 } },
+                            "\uD83D\uDCA1 Allocate ",
+                            React.createElement("b", null,
+                                fmt(st.perPay),
+                                "/pay"),
+                            " for ",
+                            st.weeksLeft,
+                            " more pay",
+                            st.weeksLeft > 1 ? "s" : "",
+                            " to hit ",
+                            fmt(p.target),
+                            " by ",
+                            shortDate(p.due),
+                            "."),
+                        st.need > 0 && !st.weeksLeft && React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginBottom: 11, lineHeight: 1.4 } }, "Add a due date to get a per-pay target."),
+                        React.createElement("div", { style: { display: "flex", gap: 8 } },
+                            React.createElement("input", { value: allocAmt, inputMode: "decimal", placeholder: "Allocate $", onChange: (e) => setAllocAmt(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, flex: 1 } }),
+                            React.createElement("button", { onClick: () => allocate(p.id), style: mBtn(C.blue) }, "Add")),
+                        React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
+                            React.createElement("button", { onClick: () => spendFrom(p.id), style: { ...mBtn(C.green), flex: 1 } }, "Spend from project"),
+                            React.createElement("button", { onClick: () => delProject(p.id), style: { ...mBtn("transparent"), border: `1px solid ${C.line}`, color: C.red } }, "Delete"))))));
+            })),
+        React.createElement("button", { onClick: () => setAdding(true), "aria-label": "New project", style: { position: "fixed", bottom: 84, right: "max(18px, calc(50% - 262px))", width: 50, height: 50, borderRadius: 99, border: "none", background: C.blue, color: "#fff", fontSize: 24, fontWeight: 700, lineHeight: 1, boxShadow: "0 6px 20px rgba(0,0,0,0.45)", cursor: "pointer", zIndex: 90 } }, "\uFF0B"),
+        adding && (React.createElement("div", { onClick: () => setAdding(false), style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { background: C.bgCard, width: "100%", maxWidth: 560, maxHeight: "85vh", overflowY: "auto", borderRadius: "18px 18px 0 0", padding: 18 } },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 } },
+                    React.createElement("span", { style: { fontSize: 16, fontWeight: 800, color: C.text } }, "New project"),
+                    React.createElement("button", { onClick: () => setAdding(false), style: { background: "transparent", border: "none", color: C.textFaint, fontSize: 20, cursor: "pointer" } }, "\u2715")),
+                React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 } }, icons.map((e) => React.createElement("button", { key: e, onClick: () => setIc(e), style: { fontSize: 18, padding: "4px 8px", borderRadius: 8, border: `1px solid ${ic === e ? C.blue : C.line}`, background: ic === e ? C.blue : "transparent", cursor: "pointer" } }, e))),
                 React.createElement("input", { value: nm, placeholder: "Project name", onChange: (e) => setNm(e.target.value), style: { ...inp, marginBottom: 8 } }),
                 React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
                     React.createElement("input", { value: tg, inputMode: "decimal", placeholder: "Target $", onChange: (e) => setTg(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, flex: 1 } }),
                     React.createElement("input", { value: alloc0, inputMode: "decimal", placeholder: "Already $", onChange: (e) => setAlloc0(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, flex: 1 } })),
                 React.createElement("input", { type: "date", value: due, onChange: (e) => setDue(e.target.value), style: { ...inp, marginBottom: 8, colorScheme: "dark" } }),
-                React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } }, [["must", "Must"], ["need", "Need"], ["want", "Want"]].map(([v, l]) => (React.createElement("button", { key: v, onClick: () => setPri(v), style: { flex: 1, padding: "10px 0", borderRadius: 10, border: `1px solid ${pri === v ? priMeta[v].c : C.line}`, background: pri === v ? priMeta[v].c : "transparent", color: pri === v ? "#fff" : C.textDim, fontWeight: 700, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer" } }, l)))),
-                React.createElement("div", { style: { display: "flex", gap: 8 } },
-                    React.createElement("button", { onClick: addProject, style: { ...mBtn(C.green), flex: 1 } }, "Add project"),
-                    React.createElement("button", { onClick: () => setAdding(false), style: { ...mBtn("transparent"), border: `1px solid ${C.line}`, color: C.textDim } }, "Cancel")))),
-            React.createElement("div", { style: { borderTop: `1px solid ${C.line}`, marginTop: 14, paddingTop: 12 } },
-                React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 4 } },
-                    React.createElement("span", { style: { fontSize: 11.5, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Weekly baseline \u2014 reliable set-aside/week (after bills)"),
-                    React.createElement("input", { value: c.weeklySurplus || "", inputMode: "decimal", placeholder: "$0", onChange: (e) => setSurplus(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, width: 92, flex: "none", textAlign: "right" } })),
-                tfnAutoBaseline(data) != null && React.createElement("button", { onClick: () => setSurplus(String(Math.round(tfnAutoBaseline(data)))), style: { background: "transparent", border: `1px solid ${C.line}`, color: C.blue, borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", marginBottom: 12, width: "100%" } },
-                    "\u21BB Suggest from my timesheets \u2014 ",
-                    fmt(tfnAutoBaseline(data)),
-                    "/wk (job pay \u2212 bills). Add your Uber minimum if you want."),
-                React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 12 } },
-                    React.createElement("span", { style: { fontSize: 11.5, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Uber ceiling \u2014 realistic max extra/week"),
-                    React.createElement("input", { value: c.uberMax || "", inputMode: "decimal", placeholder: "$0", onChange: (e) => setUberMax(e.target.value.replace(/[^0-9.]/g, "")), style: { ...inp, width: 92, flex: "none", textAlign: "right" } })),
-                React.createElement("div", { style: { fontSize: 11.5, color: C.textDim, marginBottom: 6 } }, "Payday"),
-                React.createElement("div", { style: { display: "flex", gap: 5 } }, [["Mo", 1], ["Tu", 2], ["We", 3], ["Th", 4], ["Fr", 5], ["Sa", 6], ["Su", 0]].map(([l, n]) => (React.createElement("button", { key: n, onClick: () => setPayday(n), style: { flex: 1, padding: "8px 0", borderRadius: 8, border: `1px solid ${(c.paydayDow ?? 4) === n ? C.blue : C.line}`, background: (c.paydayDow ?? 4) === n ? C.blue : "transparent", color: (c.paydayDow ?? 4) === n ? "#fff" : C.textDim, fontWeight: 700, fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" } }, l))))),
-            React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 10, lineHeight: 1.45 } }, "Free Cash = Current Cash \u2212 bills \u2212 goals = safe to spend today. The banner tells you how much extra Uber to do this week to keep your Must goals on time. Dots: \uD83D\uDFE2 on track \u00B7 \uD83D\uDFE0 tight \u00B7 \uD83D\uDD34 won't make it."))));
+                React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 12 } }, [["must", "Must"], ["need", "Need"], ["want", "Want"]].map(([v, l]) => (React.createElement("button", { key: v, onClick: () => setPri(v), style: { flex: 1, padding: "10px 0", borderRadius: 10, border: `1px solid ${pri === v ? priMeta[v].c : C.line}`, background: pri === v ? priMeta[v].c : "transparent", color: pri === v ? "#fff" : C.textDim, fontWeight: 700, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer" } }, l)))),
+                React.createElement("button", { onClick: addProject, style: { ...mBtn(C.green), width: "100%" } }, "Add project"))))));
 }
 function WhatIf({ data }) {
     const [open, setOpen] = useState(false);
@@ -2672,6 +2759,10 @@ function FixedCreator({ data, update }) {
 }
 function Settings({ data, setData, onOpenUndo }) {
     const [copied, setCopied] = useState(false);
+    const com = data.commitments || {};
+    const setCom = (k, v) => setData((prev) => ({ ...prev, commitments: { ...(prev.commitments || { projects: [] }), [k]: v } }));
+    const numOnly = (v) => Math.max(0, Number(String(v).replace(/[^0-9.]/g, "")) || 0);
+    const planInp = { width: 96, boxSizing: "border-box", background: C.bgCardHi, border: `1px solid ${C.line}`, borderRadius: 10, color: C.text, fontSize: 14, padding: "10px 12px", fontFamily: "inherit", outline: "none", textAlign: "right" };
     const [confirm, setConfirm] = useState(false);
     const [stmtOpen, setStmtOpen] = useState(false);
     const exportData = async () => {
@@ -2804,6 +2895,19 @@ function Settings({ data, setData, onOpenUndo }) {
                         r,
                         "%) to all shifts");
                 })())),
+        React.createElement(MenuSection, { icon: "\uD83C\uDFAF", title: "Cash flow plan", subtitle: "Baseline, Uber ceiling, payday" },
+            React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 4 } },
+                React.createElement("span", { style: { fontSize: 12, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Weekly baseline \u2014 reliable set-aside per week, after bills"),
+                React.createElement("input", { value: com.weeklySurplus || "", inputMode: "decimal", placeholder: "$0", onChange: (e) => setCom("weeklySurplus", numOnly(e.target.value)), style: planInp })),
+            tfnAutoBaseline(data) != null && React.createElement("button", { onClick: () => setCom("weeklySurplus", Math.round(tfnAutoBaseline(data))), style: { background: "transparent", border: `1px solid ${C.line}`, color: C.blue, borderRadius: 8, padding: "7px 10px", fontSize: 11, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", marginBottom: 14, width: "100%" } },
+                "\u21BB Suggest from my timesheets \u2014 ",
+                fmt(tfnAutoBaseline(data)),
+                "/wk (job pay \u2212 bills)"),
+            React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 14 } },
+                React.createElement("span", { style: { fontSize: 12, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Uber ceiling \u2014 realistic max extra per week"),
+                React.createElement("input", { value: com.uberMax || "", inputMode: "decimal", placeholder: "$0", onChange: (e) => setCom("uberMax", numOnly(e.target.value)), style: planInp })),
+            React.createElement("div", { style: { fontSize: 12, color: C.textDim, marginBottom: 7 } }, "Payday"),
+            React.createElement("div", { style: { display: "flex", gap: 5 } }, [["Mo", 1], ["Tu", 2], ["We", 3], ["Th", 4], ["Fr", 5], ["Sa", 6], ["Su", 0]].map(([l, n]) => (React.createElement("button", { key: n, onClick: () => setCom("paydayDow", n), style: { flex: 1, padding: "9px 0", borderRadius: 8, border: `1px solid ${(com.paydayDow ?? 4) === n ? C.blue : C.line}`, background: (com.paydayDow ?? 4) === n ? C.blue : "transparent", color: (com.paydayDow ?? 4) === n ? "#fff" : C.textDim, fontWeight: 700, fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" } }, l))))),
         React.createElement(MenuSection, { icon: "\uD83D\uDD01", title: "Fixed costs", subtitle: "Recurring bills you tick when paid" },
             React.createElement(FixedCreator, { data: data, update: update })),
         React.createElement(MenuSection, { icon: "\uD83D\uDCC4", title: "Statement (PDF)", subtitle: "Printable history, by financial year" },
