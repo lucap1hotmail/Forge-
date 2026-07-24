@@ -5,17 +5,21 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Forge" />
-<meta name="theme-color" content="#141E33" />
+<meta name="theme-color" content="#0B111A" />
 <title>Forge</title>
-<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22Forge%22%2C%22short_name%22%3A%22Forge%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23141E33%22%2C%22theme_color%22%3A%22%23141E33%22%2C%22start_url%22%3A%22.%22%7D" />
+<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22Forge%22%2C%22short_name%22%3A%22Forge%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%230B111A%22%2C%22theme_color%22%3A%22%230B111A%22%2C%22start_url%22%3A%22.%22%7D" />
 <style>
   * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; background: #141E33; min-height: 100%; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #E8EDF7; overscroll-behavior-y: none; }
+  html { background: #0B111A; }
+  body { margin: 0; padding: 0; min-height: 100%; background: #0B111A; background-image: linear-gradient(180deg, #121A2B 0%, #0B111A 55%); background-attachment: fixed; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif; color: #F1F5F9; overscroll-behavior-y: none; -webkit-font-smoothing: antialiased; }
+  ::selection { background: rgba(34,197,94,.28); }
+  button, input, select, textarea { font-family: inherit; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
   #root { max-width: 560px; margin: 0 auto; }
   @media print { html, body { background: #fff; } }
   input[type=time]{ color-scheme: dark; }
-  select { color: #E8EDF7; }
+  select { color: #F1F5F9; }
 </style>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
@@ -29,16 +33,16 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 //  Palette: midnight base · mint=positive · coral=debt/negative · gold=capital
 // ─────────────────────────────────────────────────────────────
 const C = {
-    bg: "#141E33", bgCard: "#1C2940", bgCardHi: "#26344F", line: "#33425F",
-    text: "#E8EDF7", textDim: "#94A3BD", textFaint: "#6E7E9B",
-    green: "#3FD68A", red: "#FF6B6B", gold: "#E5B567", blue: "#5B8DEF",
-    violet: "#9B8CEF", teal: "#3FD6C2", pink: "#EF8CC8",
-    orange: "#F2994A",
-    lime: "#B5E853",
+    bg: "#0B111A", bgCard: "#1A2233", bgCardHi: "#222C41", line: "#2B3852",
+    text: "#F1F5F9", textDim: "#94A3B8", textFaint: "#64748B",
+    green: "#22C55E", red: "#FF5C5C", gold: "#D4AD17", blue: "#4FB9FF",
+    violet: "#A78BFA", teal: "#2DD4BF", pink: "#F472B6",
+    orange: "#FB923C",
+    lime: "#A3E635",
 };
 // universe colors: 4 action worlds get a colour, overview pages stay neutral
-const DOMAIN = { home: C.textFaint, income: C.green, spend: C.red, tax: C.gold, plan: C.blue, trends: C.textFaint, settings: C.textFaint };
-const TAB_ON = { home: C.text, income: C.green, spend: C.red, tax: C.gold, plan: C.blue, trends: C.text, settings: C.text };
+const DOMAIN = { home: C.green, income: C.green, spend: C.red, tax: C.gold, plan: C.blue, trends: C.violet, settings: C.textDim };
+const TAB_ON = { home: C.green, income: C.green, spend: C.red, tax: C.gold, plan: C.blue, trends: C.violet, settings: C.text };
 const DomainCtx = React.createContext(C.textFaint);
 const CURRENCY = "$";
 const STORAGE_KEY = "lucaFinanceOS_v1"; // unchanged → data persists
@@ -87,7 +91,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v9.4";
+const APP_VERSION = "v9.6";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "Luca", started: new Date().toISOString() },
@@ -1229,36 +1233,35 @@ function Commitments({ data, update }) {
         React.createElement(Card, null,
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 } },
                 React.createElement("div", null,
-                    React.createElement("div", { style: { fontSize: 10.5, fontWeight: 800, letterSpacing: 0.7, color: C.textFaint, textTransform: "uppercase" } }, "Set aside this week"),
-                    React.createElement("div", { style: { fontSize: 36, fontWeight: 800, color: C.text, lineHeight: 1.05, marginTop: 6 } }, fmt(plan.requiredAll))),
-                React.createElement("span", { style: { fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: dot[plan.status], background: dotBg[plan.status], border: `1px solid ${dot[plan.status]}44`, borderRadius: 99, padding: "5px 10px", whiteSpace: "nowrap", flexShrink: 0 } }, statusLabel[plan.status])),
-            plan.requiredAll > 0 && (React.createElement("div", { style: { marginTop: 18 } },
-                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "8px 0" } },
-                    React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Job covers"),
-                    React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: C.text } }, fmt(plan.baseline))),
-                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: `1px solid ${C.line}` } },
-                    React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Still missing"),
-                    React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: gap > 0 ? C.gold : C.green } }, gap > 0 ? fmt(gap) : "—")),
-                gap > 0 && hrs != null && hrs > 0 && (React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: `1px solid ${C.line}` } },
-                    React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Uber needed"),
-                    React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: C.gold } },
-                        "~",
-                        hrs,
-                        " h"))))),
-            React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginTop: 14, lineHeight: 1.4 } }, plan.msg)),
-        React.createElement(Card, null,
-            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 12 } },
+                    React.createElement("div", { style: { fontSize: 10.5, fontWeight: 800, letterSpacing: 0.8, color: C.textFaint, textTransform: "uppercase" } }, "Set aside this week"),
+                    React.createElement("div", { style: { fontSize: 40, fontWeight: 800, color: C.text, lineHeight: 1.02, marginTop: 7, letterSpacing: -1.4 } }, fmt(plan.requiredAll))),
+                React.createElement("span", { style: { fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: dot[plan.status], background: dotBg[plan.status], border: `1px solid ${dot[plan.status]}44`, borderRadius: 99, padding: "6px 11px", whiteSpace: "nowrap", flexShrink: 0 } }, statusLabel[plan.status])),
+            React.createElement("div", { style: { marginTop: 18, background: C.bgCardHi, borderRadius: 14, padding: "14px 15px", display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 12 } },
                 React.createElement("div", null,
-                    React.createElement("div", { style: { fontSize: 10.5, fontWeight: 800, letterSpacing: 0.7, color: s.freeCash < 0 ? C.red : C.green, textTransform: "uppercase" } }, "Free cash"),
-                    React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 6 } },
+                    React.createElement("div", { style: { fontSize: 10, fontWeight: 800, letterSpacing: 0.8, color: s.freeCash < 0 ? C.red : C.green, textTransform: "uppercase" } }, "Free cash"),
+                    React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 6, lineHeight: 1.5 } },
                         fmt(s.currentCash),
                         " cash \u00B7 ",
                         fmt(s.buffer),
                         " bills \u00B7 ",
                         fmt(s.reserved),
                         " goals")),
-                React.createElement("span", { style: { fontSize: 32, fontWeight: 800, color: s.freeCash < 0 ? C.red : C.green, lineHeight: 1 } }, fmt(s.freeCash))),
-            s.freeCash < 0 && React.createElement("div", { style: { fontSize: 11.5, color: C.red, marginTop: 12, fontWeight: 600 } }, "Committed more than you have \u2014 push a goal or lower an allocation.")),
+                React.createElement("span", { style: { fontSize: 30, fontWeight: 800, color: s.freeCash < 0 ? C.red : C.green, lineHeight: 1, letterSpacing: -0.8 } }, fmt(s.freeCash))),
+            s.freeCash < 0 && React.createElement("div", { style: { fontSize: 11.5, color: C.red, marginTop: 10, fontWeight: 600, lineHeight: 1.4 } }, "Committed more than you have \u2014 push a goal or lower an allocation."),
+            plan.requiredAll > 0 && (React.createElement("div", { style: { marginTop: 18 } },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "9px 0" } },
+                    React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Job covers"),
+                    React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: C.text } }, fmt(plan.baseline))),
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "9px 0", borderTop: `1px solid ${C.line}` } },
+                    React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Still missing"),
+                    React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: gap > 0 ? C.gold : C.green } }, gap > 0 ? fmt(gap) : "—")),
+                gap > 0 && hrs != null && hrs > 0 && (React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "9px 0", borderTop: `1px solid ${C.line}` } },
+                    React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, "Uber needed"),
+                    React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: C.gold } },
+                        "~",
+                        hrs,
+                        " h"))))),
+            React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginTop: 14, lineHeight: 1.45 } }, plan.msg)),
         React.createElement(SectionTitle, null, "Projects"),
         React.createElement(Card, null,
             s.projects.length === 0 && React.createElement(Empty, null, "No projects yet. Tap \uFF0B to add one."),
@@ -1404,7 +1407,16 @@ function Home({ data, update, setTab, openHistory, openWork }) {
     const ws = workSummary(data);
     const cats = Object.entries(t.byCat).sort((a, b) => b[1] - a[1]);
     const totalCat = cats.reduce((s, [, v]) => s + v, 0) || 1;
+    const hr = new Date().getHours();
+    const greet = hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
+    const who = (data.meta && data.meta.name) ? data.meta.name : "";
     return (React.createElement("div", { style: { padding: "8px 16px 0" } },
+        React.createElement("div", { style: { margin: "2px 2px 18px" } },
+            React.createElement("div", { style: { fontSize: 21, fontWeight: 700, color: C.text, letterSpacing: -0.4 } },
+                greet,
+                who ? ", " + who : "",
+                "."),
+            React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 4 } }, "Here is where you stand today.")),
         React.createElement(Accounts, { data: data, update: update }),
         React.createElement(Commitments, { data: data, update: update }),
         React.createElement(WhatIf, { data: data }),
@@ -1515,7 +1527,7 @@ function Home({ data, update, setTab, openHistory, openWork }) {
                     Math.abs(dH).toFixed(1),
                     "h vs last week");
             })()),
-        React.createElement(Timesheet, { data: data, openWork: openWork }),
+        React.createElement(WeekSheet, { data: data, openWork: openWork }),
         (() => {
             const r = activityRecords(data);
             return (React.createElement(React.Fragment, null,
@@ -2036,7 +2048,7 @@ function TimesheetList({ data, update }) {
                     React.createElement("button", { onClick: () => del(t.id), style: delBtn }, "\u2715"))))))));
 }
 function weekAddDays(mondayKey, days) { const d = new Date(mondayKey + "T00:00:00"); d.setDate(d.getDate() + days); return isoLocal(d); }
-function Timesheet({ data, openWork }) {
+function WeekSheet({ data, openWork }) {
     const [off, setOff] = useState(0);
     const wkStart = weekKey(off);
     const days = [0, 1, 2, 3, 4, 5, 6].map((i) => weekAddDays(wkStart, i));
@@ -2209,7 +2221,7 @@ function Income({ data, update, openHistory, showToast }) {
             React.createElement("button", { onClick: () => setView("month"), style: { flex: 1, padding: "11px 0", borderRadius: 9, border: "none", background: view === "month" ? C.green : "transparent", color: view === "month" ? "#0a1018" : C.textDim, fontWeight: 800, fontSize: 13.5, fontFamily: "inherit", cursor: "pointer" } }, "This month"),
             React.createElement("button", { onClick: () => setView("tax"), style: { flex: 1, padding: "11px 0", borderRadius: 9, border: "none", background: view === "tax" ? C.gold : "transparent", color: view === "tax" ? "#1a1407" : C.textDim, fontWeight: 800, fontSize: 13.5, fontFamily: "inherit", cursor: "pointer" } }, "Tax year")),
         view === "tax" ? React.createElement(TaxYear, { data: data, openHistory: openHistory }) : (React.createElement(React.Fragment, null,
-            React.createElement(Hero, { label: "Really yours this month", value: fmt(moneyStats(data).thisMonth), color: C.green, sub: `This week: ${fmt(moneyStats(data).thisWeek)} · TFN net + ABN after ATO` }),
+            React.createElement(Hero, { label: "Really yours this month", value: fmt(moneyStats(data).thisMonth), color: C.green, sub: `This week: ${fmt(moneyStats(data).thisWeek)} · TFN net + ABN after ATO`, spark: Object.keys(moneyStats(data).byMonth).sort().slice(-8).map((k) => moneyStats(data).byMonth[k]) }),
             React.createElement(InsightCard, { lines: incomeInsights(data), tone: C.green }),
             (() => {
                 const ms = moneyStats(data);
@@ -2387,7 +2399,7 @@ function Spend({ data, update, openHistory, showToast }) {
     const spentMonth = t.varMonth + t.payMonth;
     const [spClose, setSpClose] = useState(0);
     return (React.createElement("div", { style: { padding: "8px 16px 0" } },
-        React.createElement(Hero, { label: "Spent this month", value: fmt(spentMonth), color: C.red, sub: `Fixed paid ${fmt(t.payMonth)} · variable ${fmt(t.varMonth)}` }),
+        React.createElement(Hero, { label: "Spent this month", value: fmt(spentMonth), color: C.red, sub: `Fixed paid ${fmt(t.payMonth)} · variable ${fmt(t.varMonth)}`, spark: Object.keys(spendMonthly(data)).sort().slice(-8).map((k) => spendMonthly(data)[k]) }),
         React.createElement(InsightCard, { lines: spendInsights(data), tone: C.red }),
         (() => {
             const biggest = Math.max(0, ...(data.spend || []).map((s) => Number(s.amount || 0)));
@@ -2583,6 +2595,8 @@ function Tax({ data, update, openWork }) {
                 fmt(fyGross),
                 " \u00B7 after tax, super & fuel"),
             React.createElement("div", { style: { height: 1, background: C.line, margin: "14px 0" } }),
+            React.createElement(Row, { k: "Gross earned", v: fmt(fyGross) }),
+            React.createElement(Row, { k: "Fuel", v: fmt(-Math.max(0, fyGross - fyNet - fyTaxAside - superPot)), tone: "red" }),
             React.createElement(Row, { k: `Tax to set aside · ${Math.round(rateNow * 100)}% now`, v: fmt(-fyTaxAside), tone: "gold" }),
             React.createElement(Row, { k: `Super to set aside (${Math.round(superRate * 100)}%)`, v: fmt(-superPot), tone: "blue" }),
             React.createElement("div", { style: { height: 1, background: C.line, margin: "12px 0" } }),
@@ -3587,13 +3601,32 @@ function Celebration({ goal, onDone }) {
 //  REUSABLE UI
 // ─────────────────────────────────────────────────────────────
 const lbl = { fontSize: 11, color: C.textFaint, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 };
-function Card({ children }) { return React.createElement("div", { style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 16, padding: 13, marginBottom: 10 } }, children); }
-function SectionTitle({ children }) { const c = React.useContext(DomainCtx); return React.createElement("div", { style: { ...lbl, color: c, margin: "16px 2px 8px" } }, children); }
-function Hero({ label, value, color, sub }) {
-    return (React.createElement("div", { style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 16, padding: "14px 16px", marginBottom: 4 } },
-        React.createElement("div", { style: { fontSize: 11, color: C.textFaint, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 } }, label),
-        React.createElement("div", { style: { fontSize: 34, fontWeight: 800, color: color || C.text, marginTop: 3, letterSpacing: -1 } }, value),
-        sub && React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 3 } }, sub)));
+function Spark({ points, color, height = 56 }) {
+    const pts = (points || []).map(Number).filter((n) => isFinite(n));
+    if (pts.length < 2)
+        return null;
+    const min = Math.min(...pts, 0), max = Math.max(...pts, 1), rng = (max - min) || 1;
+    const W = 300, H = height, pad = 4;
+    const X = (i) => (i / (pts.length - 1)) * W;
+    const Y = (v) => pad + (1 - (v - min) / rng) * (H - pad * 2);
+    const line = pts.map((v, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(" ");
+    const gid = "sk" + String(color).replace(/[^a-zA-Z0-9]/g, "");
+    return (React.createElement("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", style: { width: "100%", height, display: "block", marginTop: 14 }, "aria-hidden": "true" },
+        React.createElement("defs", null,
+            React.createElement("linearGradient", { id: gid, x1: "0", y1: "0", x2: "0", y2: "1" },
+                React.createElement("stop", { offset: "0%", stopColor: color, stopOpacity: "0.26" }),
+                React.createElement("stop", { offset: "100%", stopColor: color, stopOpacity: "0" }))),
+        React.createElement("path", { d: `${line} L${W} ${H} L0 ${H} Z`, fill: `url(#${gid})` }),
+        React.createElement("path", { d: line, fill: "none", stroke: color, strokeWidth: "2", strokeLinejoin: "round", strokeLinecap: "round", vectorEffect: "non-scaling-stroke" })));
+}
+function Card({ children }) { return React.createElement("div", { style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 18, padding: 16, marginBottom: 12 } }, children); }
+function SectionTitle({ children }) { const c = React.useContext(DomainCtx); return React.createElement("div", { style: { ...lbl, color: c, margin: "22px 2px 10px" } }, children); }
+function Hero({ label, value, color, sub, spark }) {
+    return (React.createElement("div", { style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 18, padding: "18px 18px 20px", marginBottom: 6 } },
+        React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8 } }, label),
+        React.createElement("div", { style: { fontSize: 40, fontWeight: 800, color: color || C.text, marginTop: 6, letterSpacing: -1.4, lineHeight: 1.05 } }, value),
+        sub && React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 6 } }, sub),
+        spark && spark.length > 1 && React.createElement(Spark, { points: spark, color: color || C.text })));
 }
 function CardHead({ left, right, tone }) {
     return (React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 8 } },
@@ -3681,7 +3714,7 @@ function Collapse({ label, tone, children, closeSignal }) {
 }
 const inp = { width: "100%", background: C.bgCardHi, border: `1px solid ${C.line}`, borderRadius: 12, color: C.text, fontSize: 15, padding: "12px", fontFamily: "inherit", outline: "none" };
 const delBtn = { background: "transparent", border: "none", color: C.textFaint, fontSize: 15, cursor: "pointer", padding: "4px 6px", lineHeight: 1 };
-const chip = (col) => ({ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${col}33`, background: `${col}1A`, color: col, fontWeight: 800, fontSize: 13, fontFamily: "inherit", cursor: "pointer" });
+const chip = (col) => ({ flex: 1, padding: "9px 0", borderRadius: 12, border: `1px solid ${col}33`, background: `${col}1A`, color: col, fontWeight: 800, fontSize: 13, fontFamily: "inherit", cursor: "pointer" });
 function TabBar({ tab, setTab }) {
     const tabs = [["home", "Home", "◈"], ["income", "Income", "↑"], ["spend", "Spend", "↓"], ["tax", "ABN", "%"], ["plan", "Plan", "◎"], ["trends", "Trends", "↗"]];
     return (React.createElement("div", { style: { position: "fixed", bottom: 0, left: 0, right: 0, background: C.bgCard, borderTop: `1px solid ${C.line}`, display: "flex", justifyContent: "center", paddingBottom: "env(safe-area-inset-bottom)" } },
