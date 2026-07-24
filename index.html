@@ -87,7 +87,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v9.3";
+const APP_VERSION = "v9.4";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "Luca", started: new Date().toISOString() },
@@ -125,19 +125,26 @@ const seed = () => ({
 // ── helpers ──────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2, 10); }
 function hasDup(arr, date, amount) { const a = Number(amount) || 0; return (arr || []).some((x) => x.date === date && Math.abs((Number(x.gross ?? x.amount ?? 0)) - a) < 0.005); }
-function todayKey() { return new Date().toISOString().slice(0, 10); }
+function isoLocal(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+function todayKey() { return isoLocal(new Date()); }
+// Fuel cost of a shift. Uses the price captured on the shift (per tank); falls back to the current setting.
+function fuelOf(u, data) {
+    const p = (u && u.fuelPrice != null && u.fuelPrice !== "") ? Number(u.fuelPrice) : Number((data && data.tax && data.tax.fuelPrice) || 0);
+    return Number((u && u.km) || 0) * (Number((u && u.cons) || 0) / 100) * p;
+}
 function nowTs() { return new Date().toISOString(); }
 function weekKeyOf(dateStr) {
     const d = new Date(dateStr + "T00:00:00");
     const day = (d.getDay() + 6) % 7;
     d.setDate(d.getDate() - day);
-    return d.toISOString().slice(0, 10);
+    return isoLocal(d);
 }
 function weekKey(offset = 0) {
     const d = new Date();
+    d.setHours(12, 0, 0, 0);
     const day = (d.getDay() + 6) % 7;
     d.setDate(d.getDate() - day - offset * 7);
-    return d.toISOString().slice(0, 10);
+    return isoLocal(d);
 }
 function monthKeyOf(dateStr) { return dateStr.slice(0, 7); }
 function periodKey(cadence, dateStr = todayKey()) {
@@ -446,6 +453,25 @@ function migrate(d) {
     d.commitments.projects.forEach((p) => { if (p.priority === "flex")
         p.priority = "need"; if (!["must", "need", "want"].includes(p.priority))
         p.priority = "need"; });
+    // v9.4 — week keys were built in UTC and landed on Sunday in AU. Shift them to the real Monday.
+    if (!d._wkFix) {
+        const fixWk = (k) => {
+            if (!k || typeof k !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(k))
+                return k;
+            const dd = new Date(k + "T12:00:00");
+            if (dd.getDay() === 0) {
+                dd.setDate(dd.getDate() + 1);
+                return isoLocal(dd);
+            }
+            return k;
+        };
+        (d.timesheets || []).forEach((t) => { if (t.weekStart)
+            t.weekStart = fixWk(t.weekStart); });
+        (d.income || []).forEach((i) => { if (i.workedWeek)
+            i.workedWeek = fixWk(i.workedWeek); if (i.week)
+            i.week = fixWk(i.week); });
+        d._wkFix = 1;
+    }
     d.records || (d.records = {});
     d.positions || (d.positions = []);
     d.timesheets || (d.timesheets = []);
@@ -672,8 +698,7 @@ function empEntries(data) {
 }
 function workSummary(data) {
     const wk = weekKey(0), mo = todayKey().slice(0, 7);
-    const fuelPrice = Number(data.tax?.fuelPrice || 0);
-    const fuel = (u) => Number(u.km || 0) * (Number(u.cons || 0) / 100) * fuelPrice;
+    const fuel = (u) => fuelOf(u, data);
     const superRate = data.tax?.superRate ?? 0.12;
     const rateNow = currentSetAsideRate(data);
     const z = () => ({ hours: 0, gross: 0, net: 0 });
@@ -858,8 +883,7 @@ function topEmpRate(data) {
     return top;
 }
 function activityRecords(data) {
-    const fuelPrice = Number(data.tax?.fuelPrice || 0);
-    const fuel = (u) => Number(u.km || 0) * (Number(u.cons || 0) / 100) * fuelPrice;
+    const fuel = (u) => fuelOf(u, data);
     const superRate = data.tax?.superRate ?? 0.12;
     const rateNow = currentSetAsideRate(data);
     // Employment = timesheets (v2) + legacy ABN shifts
@@ -1073,25 +1097,39 @@ function feasibility(data) {
     return res;
 }
 function uberRatePerHour(data) {
-    const fuelPrice = Number(data.tax?.fuelPrice || 0);
     const rate = currentSetAsideRate(data);
     let profit = 0, hours = 0;
     (data.uber || []).filter((u) => (u.type || "uber") === "uber").forEach((u) => {
         const g = Number(u.gross || 0);
-        const fuel = Number(u.km || 0) * (Number(u.cons || 0) / 100) * fuelPrice;
+        const fuel = fuelOf(u, data);
         profit += g - fuel - g * (u.taxRate != null ? u.taxRate : rate);
         hours += Number(u.hours || 0);
     });
     return hours > 0 ? profit / hours : 0;
 }
-function tfnAutoBaseline(data) {
+// Real earning rates from logged work: TFN net $/h and avg hours/week, Uber net $/h and avg hours/week.
+function earnRates(data) {
     const ts = (data.timesheets || []).filter((t) => t.v === 2);
-    if (!ts.length)
+    const tfnHours = ts.reduce((s, t) => s + Number(t.hours || 0), 0);
+    const tfnNet = ts.reduce((s, t) => s + (Number(t.gross || 0) - Number(t.tax || 0)), 0);
+    const tfnWeeks = new Set(ts.map((t) => t.weekStart || weekKeyOf(t.date || ""))).size;
+    const ub = (data.uber || []).filter((u) => (u.type || "uber") === "uber");
+    const ubHours = ub.reduce((s, u) => s + Number(u.hours || 0), 0);
+    const ubWeeks = new Set(ub.map((u) => weekKeyOf(u.date || ""))).size;
+    const bills = (data.fixed || []).reduce((s, f) => s + toWeeklyAmt(f.amount, f.cadence), 0);
+    return {
+        tfnRate: tfnHours > 0 ? tfnNet / tfnHours : 0,
+        tfnHrsWk: tfnWeeks > 0 ? tfnHours / tfnWeeks : 0,
+        ubRate: uberRatePerHour(data),
+        ubHrsWk: ubWeeks > 0 ? ubHours / ubWeeks : 0,
+        bills,
+    };
+}
+function tfnAutoBaseline(data) {
+    const r = earnRates(data);
+    if (r.tfnHrsWk <= 0 && r.ubHrsWk <= 0)
         return null;
-    const weeks = new Set(ts.map((t) => t.weekStart || weekKeyOf(t.date || ""))).size || 1;
-    const net = ts.reduce((s, t) => s + (Number(t.gross || 0) - Number(t.tax || 0)), 0);
-    const weeklyBills = (data.fixed || []).reduce((s, f) => s + toWeeklyAmt(f.amount, f.cadence), 0);
-    return Math.max(0, net / weeks - weeklyBills);
+    return Math.max(0, r.tfnRate * r.tfnHrsWk + r.ubRate * r.ubHrsWk - r.bills);
 }
 function weeklyPlan(data) {
     const c = data.commitments || {};
@@ -1477,6 +1515,7 @@ function Home({ data, update, setTab, openHistory, openWork }) {
                     Math.abs(dH).toFixed(1),
                     "h vs last week");
             })()),
+        React.createElement(Timesheet, { data: data, openWork: openWork }),
         (() => {
             const r = activityRecords(data);
             return (React.createElement(React.Fragment, null,
@@ -1490,7 +1529,7 @@ function Home({ data, update, setTab, openHistory, openWork }) {
                 r.hasUber && (React.createElement(React.Fragment, null,
                     React.createElement("div", { style: { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: C.textFaint, margin: "14px 0 8px" } },
                         "\uD83D\uDE97 Uber records",
-                        (() => { const u = (data.uber || []).filter((x) => (x.type || "uber") === "uber"); const th = u.reduce((s, x) => s + Number(x.hours || 0), 0); const fp = Number(data.tax?.fuelPrice || 0); const sr = data.tax?.superRate ?? 0.12; const rn = currentSetAsideRate(data); const tp = u.reduce((s, x) => { const g = Number(x.gross || 0); return s + (g - g * (x.taxRate != null ? x.taxRate : rn) - g * sr - Number(x.km || 0) * (Number(x.cons || 0) / 100) * fp); }, 0); return th > 0 ? React.createElement("span", { style: { color: C.gold, textTransform: "none", letterSpacing: 0, fontWeight: 700 } },
+                        (() => { const u = (data.uber || []).filter((x) => (x.type || "uber") === "uber"); const th = u.reduce((s, x) => s + Number(x.hours || 0), 0); const sr = data.tax?.superRate ?? 0.12; const rn = currentSetAsideRate(data); const tp = u.reduce((s, x) => { const g = Number(x.gross || 0); return s + (g - g * (x.taxRate != null ? x.taxRate : rn) - g * sr - fuelOf(x, data)); }, 0); return th > 0 ? React.createElement("span", { style: { color: C.gold, textTransform: "none", letterSpacing: 0, fontWeight: 700 } },
                             " \u00B7 ",
                             fmt(tp / th),
                             "/h avg profit") : null; })()),
@@ -1996,10 +2035,58 @@ function TimesheetList({ data, update }) {
                     React.createElement("div", { style: { fontSize: 15, fontWeight: 800, color: C.green } }, fmt(t.gross)),
                     React.createElement("button", { onClick: () => del(t.id), style: delBtn }, "\u2715"))))))));
 }
-function weekAddDays(mondayKey, days) { const d = new Date(mondayKey + "T00:00:00"); d.setDate(d.getDate() + days); return d.toISOString().slice(0, 10); }
+function weekAddDays(mondayKey, days) { const d = new Date(mondayKey + "T00:00:00"); d.setDate(d.getDate() + days); return isoLocal(d); }
+function Timesheet({ data, openWork }) {
+    const [off, setOff] = useState(0);
+    const wkStart = weekKey(off);
+    const days = [0, 1, 2, 3, 4, 5, 6].map((i) => weekAddDays(wkStart, i));
+    const dayName = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const today = todayKey();
+    const tsDay = (d) => (data.timesheets || []).filter((t) => t.v === 2 && t.date === d);
+    const ubDay = (d) => (data.uber || []).filter((u) => (u.type || "uber") === "uber" && u.date === d);
+    let totH = 0, totTfn = 0, totAbn = 0;
+    days.forEach((d) => {
+        tsDay(d).forEach((t) => { totH += Number(t.hours || 0); totTfn += Number(t.gross || 0); });
+        ubDay(d).forEach((u) => { totH += Number(u.hours || 0); totAbn += Number(u.gross || 0); });
+    });
+    const nav = (dir) => setOff((o) => Math.max(0, o - dir));
+    const chip = (tag, colour, label, hours, amount, key) => (React.createElement("div", { key: key, style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 5 } },
+        React.createElement("span", { style: { fontSize: 12, color: C.textDim, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+            React.createElement("span", { style: { fontSize: 8.5, fontWeight: 800, letterSpacing: 0.5, color: colour, border: `1px solid ${colour}55`, borderRadius: 4, padding: "1px 4px", marginRight: 6 } }, tag),
+            label),
+        React.createElement("span", { style: { fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" } },
+            hours > 0 ? `${+Number(hours).toFixed(1)}h` : "",
+            " ",
+            React.createElement("span", { style: { color: C.textFaint, fontWeight: 600 } }, fmt(amount)))));
+    return (React.createElement(React.Fragment, null,
+        React.createElement(SectionTitle, null, "Timesheet"),
+        React.createElement(Card, null,
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 } },
+                React.createElement("button", { onClick: () => nav(-1), style: { background: "transparent", border: "none", color: C.textDim, fontSize: 18, cursor: "pointer", padding: "0 6px" } }, "\u2039"),
+                React.createElement("span", { style: { fontSize: 13, fontWeight: 700 } }, off === 0 ? "This week" : `Week of ${shortDate(wkStart)}`),
+                React.createElement("button", { onClick: () => nav(1), disabled: off === 0, style: { background: "transparent", border: "none", color: off === 0 ? C.line : C.textDim, fontSize: 18, cursor: off === 0 ? "default" : "pointer", padding: "0 6px" } }, "\u203A")),
+            React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 4 } }, [["Hours", `${+totH.toFixed(1)}h`, C.text], ["TFN", fmt(totTfn), C.green], ["Uber", fmt(totAbn), C.gold]].map(([l, v, col]) => (React.createElement("div", { key: l, style: { flex: 1, background: C.bgCardHi, borderRadius: 10, padding: "9px 10px" } },
+                React.createElement("div", { style: { fontSize: 15, fontWeight: 800, color: col } }, v),
+                React.createElement("div", { style: { fontSize: 9.5, color: C.textFaint, fontWeight: 700, letterSpacing: 0.4 } }, l))))),
+            days.map((d, i) => {
+                const ts = tsDay(d), ub = ubDay(d);
+                const dh = ts.reduce((s, t) => s + Number(t.hours || 0), 0) + ub.reduce((s, u) => s + Number(u.hours || 0), 0);
+                const isToday = d === today;
+                return (React.createElement("div", { key: d, style: { padding: "10px 0", borderTop: `1px solid ${C.line}`, opacity: (ts.length || ub.length) ? 1 : 0.45 } },
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" } },
+                        React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: isToday ? C.blue : C.text } },
+                            dayName[i],
+                            " ",
+                            Number(d.slice(8, 10)),
+                            isToday ? " · today" : ""),
+                        React.createElement("span", { style: { fontSize: 11.5, color: dh > 0 ? C.textDim : C.textFaint, fontWeight: 700 } }, dh > 0 ? `${+dh.toFixed(1)}h` : "—")),
+                    ts.map((t) => chip("TFN", C.green, t.employer || "Employment", t.hours, t.gross, t.id)),
+                    ub.map((u) => chip("ABN", C.gold, "Uber", u.hours, u.gross, u.id))));
+            }),
+            React.createElement("button", { onClick: () => openWork && openWork(), style: { width: "100%", marginTop: 14, padding: "11px 0", borderRadius: 10, border: `1px solid ${C.line}`, background: C.bgCardHi, color: C.text, fontWeight: 700, fontSize: 13, fontFamily: "inherit", cursor: "pointer" } }, "\uFF0B Add a shift"))));
+}
 function WeeklyWorkLog({ data, openHistory }) {
-    const fuelPrice = Number(data.tax?.fuelPrice || 0);
-    const fuel = (u) => Number(u.km || 0) * (Number(u.cons || 0) / 100) * fuelPrice;
+    const fuel = (u) => fuelOf(u, data);
     const superRate = data.tax?.superRate ?? 0.12;
     const rateNow = currentSetAsideRate(data);
     const wk = {};
@@ -2443,8 +2530,7 @@ function Tax({ data, update, openWork }) {
     const [dupArm, setDupArm] = useState(false);
     const abn = data.uber || []; // ABN shifts — source of truth for ABN income, tax & super
     const superRate = data.tax?.superRate ?? 0.12;
-    const fuelPrice = Number(data.tax?.fuelPrice || 0);
-    const shiftFuel = (u) => Number(u.km || 0) * (Number(u.cons || 0) / 100) * fuelPrice;
+    const shiftFuel = (u) => fuelOf(u, data);
     const rateNow = currentSetAsideRate(data);
     const shiftTax = (u) => Number(u.gross || 0) * (u.taxRate != null ? u.taxRate : rateNow); // frozen tax
     const shiftNet = (u) => Number(u.gross || 0) - shiftTax(u) - Number(u.gross || 0) * superRate - shiftFuel(u); // real take-home
@@ -2578,8 +2664,7 @@ function Trends({ data, openHistory, update }) {
     const [stat, setStat] = useState("Income");
     const [gran, setGran] = useState("week");
     // month range (filled, no gaps)
-    const fuelPrice = Number(data.tax?.fuelPrice || 0);
-    const shiftFuel = (u) => Number(u.km || 0) * (Number(u.cons || 0) / 100) * fuelPrice;
+    const shiftFuel = (u) => fuelOf(u, data);
     const keyOf = (d) => gran === "week" ? weekKeyOf(d || todayKey()) : (d || todayKey()).slice(0, 7);
     const bset = new Set([keyOf(todayKey())]);
     data.income.forEach((i) => bset.add(keyOf(i.date || i.week)));
@@ -2658,7 +2743,7 @@ function relDay(d) {
         return "Today";
     const yd = new Date(today + "T00:00:00");
     yd.setDate(yd.getDate() - 1);
-    if (d === yd.toISOString().slice(0, 10))
+    if (d === isoLocal(yd))
         return "Yesterday";
     return shortDate(d);
 }
@@ -2842,7 +2927,9 @@ function Settings({ data, setData, onOpenUndo }) {
                 React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginBottom: 12, lineHeight: 1.45 } },
                     "Tax % is a manual floor for ",
                     React.createElement("b", null, "this financial year only"),
-                    " \u2014 it auto-clears each 1 July, then the rate follows the ATO brackets automatically (and rises on its own past $18,200 / $45,000). Set it whenever you want to force a minimum; it never changes the past. Super % is your ABN self-provision rate. Fuel $/L drives your ABN performance net."),
+                    " \u2014 it auto-clears each 1 July, then the rate follows the ATO brackets automatically (and rises on its own past $18,200 / $45,000). Set it whenever you want to force a minimum; it never changes the past. Super % is your ABN self-provision rate. ",
+                    React.createElement("b", null, "Fuel $/L: update it each time you fill up"),
+                    " \u2014 every shift keeps the price that was set when you logged it, so past shifts never change."),
                 React.createElement("div", { style: { display: "flex", gap: 10 } },
                     React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                         React.createElement("div", { style: { ...lbl, marginBottom: 6 } }, "ABN set-aside %"),
@@ -2899,10 +2986,24 @@ function Settings({ data, setData, onOpenUndo }) {
             React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 4 } },
                 React.createElement("span", { style: { fontSize: 12, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Weekly baseline \u2014 reliable set-aside per week, after bills"),
                 React.createElement("input", { value: com.weeklySurplus || "", inputMode: "decimal", placeholder: "$0", onChange: (e) => setCom("weeklySurplus", numOnly(e.target.value)), style: planInp })),
-            tfnAutoBaseline(data) != null && React.createElement("button", { onClick: () => setCom("weeklySurplus", Math.round(tfnAutoBaseline(data))), style: { background: "transparent", border: `1px solid ${C.line}`, color: C.blue, borderRadius: 8, padding: "7px 10px", fontSize: 11, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", marginBottom: 14, width: "100%" } },
-                "\u21BB Suggest from my timesheets \u2014 ",
-                fmt(tfnAutoBaseline(data)),
-                "/wk (job pay \u2212 bills)"),
+            tfnAutoBaseline(data) != null && (() => {
+                const r = earnRates(data);
+                return (React.createElement(React.Fragment, null,
+                    React.createElement("button", { onClick: () => setCom("weeklySurplus", Math.round(tfnAutoBaseline(data))), style: { background: "transparent", border: `1px solid ${C.line}`, color: C.blue, borderRadius: 8, padding: "7px 10px", fontSize: 11, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", marginBottom: 6, width: "100%" } },
+                        "\u21BB Suggest from my hours \u2014 ",
+                        fmt(tfnAutoBaseline(data)),
+                        "/wk"),
+                    React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginBottom: 14, lineHeight: 1.5 } },
+                        "Job ",
+                        (+r.tfnHrsWk.toFixed(1)),
+                        "h/wk \u00D7 ",
+                        fmt(r.tfnRate),
+                        "/h net",
+                        r.ubHrsWk > 0 ? ` + Uber ${(+r.ubHrsWk.toFixed(1))}h/wk × ${fmt(r.ubRate)}/h net` : "",
+                        " \u2212 ",
+                        fmt(r.bills),
+                        " bills. Averages from your logged work \u2014 edit the number above if a week looks different.")));
+            })(),
             React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 14 } },
                 React.createElement("span", { style: { fontSize: 12, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Uber ceiling \u2014 realistic max extra per week"),
                 React.createElement("input", { value: com.uberMax || "", inputMode: "decimal", placeholder: "$0", onChange: (e) => setCom("uberMax", numOnly(e.target.value)), style: planInp })),
@@ -2970,8 +3071,7 @@ function Statement({ data, onClose }) {
     for (let m = 6; m < 18; m++)
         monthsFY.push(`${fySel + Math.floor(m / 12)}-${String((m % 12) + 1).padStart(2, "0")}`);
     const superRate = data.tax?.superRate ?? 0.12;
-    const fuelPrice = Number(data.tax?.fuelPrice || 0);
-    const shiftFuel = (u) => Number(u.km || 0) * (Number(u.cons || 0) / 100) * fuelPrice;
+    const shiftFuel = (u) => fuelOf(u, data);
     const rateFallback = currentSetAsideRate(data);
     const shiftNet = (u) => { const g = Number(u.gross || 0); return g - g * (u.taxRate != null ? u.taxRate : rateFallback) - g * superRate - shiftFuel(u); };
     const tfn = (data.income || []).filter((i) => inFy(i.date) && i.kind !== "reimbursement" && i.taxSource !== "abn");
@@ -3302,29 +3402,20 @@ function WorkSessionForm({ data, update, showToast, onClose }) {
     const [cats, setCats] = useState({ regular: "", ot15: "", ot2: "", sat: "", sun: "", hol: "" });
     const [notes, setNotes] = useState("");
     // Uber fields
-    const [start, setStart] = useState("");
-    const [end, setEnd] = useState("");
-    const [breakMin, setBreakMin] = useState(data.lastUsed?.breakMin != null ? String(data.lastUsed.breakMin) : "");
+    const [hoursStr, setHoursStr] = useState("");
     const [revenue, setRevenue] = useState("");
     const [km, setKm] = useState("");
     const [cons, setCons] = useState("");
     const [fuelPaid, setFuelPaid] = useState("");
-    const addMinsToTime = (t, mins) => { const [h, m] = (t || "08:00").split(":").map(Number); let tot = h * 60 + m + mins; tot = ((tot % 1440) + 1440) % 1440; return String(Math.floor(tot / 60)).padStart(2, "0") + ":" + String(tot % 60).padStart(2, "0"); };
-    const setDuration = (hrs) => { const s = start || "08:00"; if (!start)
-        setStart(s); setEnd(addMinsToTime(s, hrs * 60)); };
     const dupLast = () => { const last = (data.uber || []).find((u) => (u.type || "uber") === "uber"); if (!last)
-        return; setRevenue(String(last.gross ?? "")); setKm(String(last.km ?? "")); setCons(String(last.cons ?? "")); setStart(last.start || ""); setEnd(last.end || ""); setBreakMin(String(last.breakMin ?? "")); setDate(todayKey()); };
+        return; setRevenue(String(last.gross ?? "")); setKm(String(last.km ?? "")); setCons(String(last.cons ?? "")); setHoursStr(String(last.hours ?? "")); setDate(todayKey()); };
     const [dupArm, setDupArm] = useState(false);
     const num = (v) => Number(String(v).replace(/,/g, ".").replace(/[^0-9.]/g, "")) || 0;
     const setCat = (k, v) => setCats((c) => ({ ...c, [k]: v.replace(/,/g, ".").replace(/[^0-9.]/g, "") }));
     const profile = profiles.find((p) => p.id === profileId);
     const est = timesheetEstimate(profile, cats, data);
     // Uber calc
-    const mins = (t) => { if (!t)
-        return null; const [h, m] = t.split(":").map(Number); return h * 60 + m; };
-    const uHours = (() => { const a = mins(start), b = mins(end); if (a == null || b == null)
-        return 0; let dd = b - a; if (dd < 0)
-        dd += 1440; dd -= num(breakMin); return Math.max(0, dd / 60); })();
+    const uHours = Math.max(0, num(hoursStr));
     const uGross = num(revenue);
     const saveEmployment = () => {
         if (!profile || est.hours <= 0)
@@ -3348,8 +3439,7 @@ function WorkSessionForm({ data, update, showToast, onClose }) {
         const fp = num(fuelPaid);
         const sid = uid();
         update((d) => {
-            (d.uber || (d.uber = [])).unshift({ id: sid, type: "uber", date, gross: uGross, km: num(km), cons: num(cons), hours: uHours, taxRate: currentSetAsideRate(d), start: start || null, end: end || null, breakMin: num(breakMin), note: notes, ts: nowTs() });
-            d.lastUsed = { ...(d.lastUsed || {}), breakMin: num(breakMin) };
+            (d.uber || (d.uber = [])).unshift({ id: sid, type: "uber", date, gross: uGross, km: num(km), cons: num(cons), hours: uHours, taxRate: currentSetAsideRate(d), fuelPrice: Number(d.tax?.fuelPrice || 0), note: notes, ts: nowTs() });
             if (fp > 0) {
                 const fc = (d.categories || []).includes("Transport") ? "Transport" : (d.categories || [])[0];
                 d.spend.unshift({ id: uid(), label: "Uber fuel", amount: fp, cat: fc, date, account: "checking", ts: nowTs(), note: "Linked to Uber shift", uberId: sid });
@@ -3420,13 +3510,7 @@ function WorkSessionForm({ data, update, showToast, onClose }) {
             type === "uber" && (React.createElement(React.Fragment, null,
                 (data.uber || []).some((u) => (u.type || "uber") === "uber") && React.createElement("button", { onClick: dupLast, style: { width: "100%", marginBottom: 12, padding: "10px 0", borderRadius: 10, border: `1px solid ${C.line}`, background: C.bgCardHi, color: C.textDim, fontWeight: 700, fontSize: 13, fontFamily: "inherit", cursor: "pointer" } }, "\uD83D\uDD01 Duplicate last shift"),
                 React.createElement(DateField, { label: "Date", value: date, onChange: setDate }),
-                React.createElement("div", { style: { display: "flex", gap: 10 } },
-                    timeField("Start", start, setStart),
-                    timeField("End", end, setEnd)),
-                React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 8, marginBottom: 4 } }, [4, 6, 8, 10, 12].map((h) => (React.createElement("button", { key: h, onClick: () => setDuration(h), style: { flex: 1, padding: "8px 0", borderRadius: 8, border: `1px solid ${C.line}`, background: C.bgCardHi, color: C.textDim, fontWeight: 700, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer" } },
-                    h,
-                    "h")))),
-                React.createElement(Field, { label: "Break (minutes)", value: breakMin, onChange: setBreakMin, placeholder: "0", numeric: true }),
+                React.createElement(Field, { label: "Hours worked", value: hoursStr, onChange: setHoursStr, placeholder: "e.g. 4.5", numeric: true }),
                 React.createElement(Field, { label: "Uber revenue (gross)", value: revenue, onChange: setRevenue, placeholder: "0", numeric: true, prefix: CURRENCY }),
                 React.createElement(Field, { label: "Kilometres (optional)", value: km, onChange: setKm, placeholder: "0", numeric: true }),
                 React.createElement(Field, { label: "Consumption L/100km (optional)", value: cons, onChange: setCons, placeholder: "0", numeric: true }),
@@ -3434,7 +3518,7 @@ function WorkSessionForm({ data, update, showToast, onClose }) {
                 React.createElement(Field, { label: "Notes (optional)", value: notes, onChange: setNotes, placeholder: "" }),
                 React.createElement("div", { style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", margin: "6px 0 14px" } },
                     React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 } },
-                        React.createElement("span", { style: { color: C.textDim } }, "Hours (auto)"),
+                        React.createElement("span", { style: { color: C.textDim } }, "Hours"),
                         React.createElement("span", { style: { fontWeight: 700 } }, uHours > 0 ? `${+uHours.toFixed(2)} h` : "—")),
                     React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 13 } },
                         React.createElement("span", { style: { color: C.textDim } }, "Gross"),
