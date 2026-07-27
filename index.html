@@ -103,22 +103,12 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v11.5";
+const APP_VERSION = "v12.1";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
-    meta: { name: "Luca", started: new Date().toISOString() },
+    meta: { name: "", started: new Date().toISOString() },
     income: [],
-    fixed: [
-        { id: uid(), name: "Rent", amount: 250, cadence: "weekly", cat: "Housing & Bills" },
-        { id: uid(), name: "WiFi", amount: 68.90, cadence: "monthly", cat: "Housing & Bills" },
-        { id: uid(), name: "Phone plan", amount: 18, cadence: "monthly", cat: "Housing & Bills" },
-        { id: uid(), name: "RACQ", amount: 44, cadence: "monthly", cat: "Transport" },
-        { id: uid(), name: "Cloud +", amount: 4.49, cadence: "monthly", cat: "Subscriptions" },
-        { id: uid(), name: "Amazon Prime", amount: 13, cadence: "monthly", cat: "Subscriptions" },
-        { id: uid(), name: "Amazon Kindle", amount: 13.99, cadence: "monthly", cat: "Subscriptions" },
-        { id: uid(), name: "Revolut Metal", amount: 30, cadence: "monthly", cat: "Subscriptions" },
-        { id: uid(), name: "Spotify", amount: 21, cadence: "monthly", cat: "Subscriptions" },
-    ],
+    fixed: [],
     payments: [],
     spend: [],
     goals: [
@@ -164,6 +154,8 @@ function weekKey(offset = 0) {
     d.setDate(d.getDate() - day - offset * 7);
     return isoLocal(d);
 }
+function prevMonthKey() { const d = new Date(); d.setMonth(d.getMonth() - 1); return isoLocal(d).slice(0, 7); }
+function pctDelta(a, b) { return b !== 0 ? ((a - b) / Math.abs(b)) * 100 : a !== 0 ? 100 : 0; }
 function monthKeyOf(dateStr) { return typeof dateStr === "string" ? dateStr.slice(0, 7) : ""; }
 function periodKey(cadence, dateStr = todayKey()) {
     switch (cadence) {
@@ -174,9 +166,6 @@ function periodKey(cadence, dateStr = todayKey()) {
         default: return monthKeyOf(dateStr);
     }
 }
-function periodLabel(cadence) {
-    return ({ weekly: "this week", fortnightly: "this fortnight", monthly: "this month", yearly: "this year" })[cadence] || "this period";
-}
 function paidPeriodLabel(cadence) {
     const d = new Date();
     if (cadence === "yearly")
@@ -186,6 +175,24 @@ function paidPeriodLabel(cadence) {
     return d.toLocaleString("en-AU", { month: "short" });
 }
 function hm(h) { const t = Math.max(0, Math.round((Number(h) || 0) * 60)); const H = Math.floor(t / 60), M = t % 60; return M ? `${H}h ${M}m` : `${H}h`; }
+// ── Mémoïsation des calculs lourds.
+// Clé = l'objet data lui-même (WeakMap) : comme update() le remplace à chaque
+// modification, le cache s'invalide automatiquement. Zéro invalidation manuelle.
+const CALC_CACHE = new WeakMap();
+function memoCalc(name, fn) {
+    return function (data) {
+        if (!data || typeof data !== "object")
+            return fn(data);
+        let box = CALC_CACHE.get(data);
+        if (!box) {
+            box = {};
+            CALC_CACHE.set(data, box);
+        }
+        if (!(name in box))
+            box[name] = fn(data);
+        return box[name];
+    };
+}
 function fmt(n) {
     const s = n < 0 ? "-" : "";
     const a = Math.abs(Number(n) || 0);
@@ -195,6 +202,20 @@ function fmt(n) {
 function fmtSigned(n) { return (n >= 0 ? "+" : "") + fmt(n); }
 function toMonthly(a, c) { return c === "weekly" ? a * 52 / 12 : c === "fortnightly" ? a * 26 / 12 : c === "yearly" ? a / 12 : a; }
 function daysBetween(a, b) { return Math.max(0, (new Date(b) - new Date(a)) / 86400000); }
+// ── Barème résident FY2026-27 (source unique). Medicare 2% appliqué séparément.
+// taxBands(fy) est LA source unique du barème : le calcul d'impôt et
+// l'affichage de la jauge en dérivent tous les deux.
+function taxBands(fy) {
+    return [
+        { to: 18200, rate: 0, label: "0" },
+        { to: 45000, rate: lowBracketRate(fy) },
+        { to: 135000, rate: 0.30 },
+        { to: 190000, rate: 0.37 },
+        { to: Infinity, rate: 0.45 },
+    ].map((b) => ({ ...b, label: b.label || Math.round(b.rate * 100) + "%" }));
+}
+const TAX_CAP = 190000;
+const MEDICARE_RATE = 0.02;
 function fyKeyOf(dateStr) {
     if (typeof dateStr !== "string" || !/^\d{4}-\d{2}/.test(dateStr)) {
         const n = new Date();
@@ -321,7 +342,6 @@ function App() {
     const [toast, setToast] = useState(null);
     const showToast = useCallback((msg) => { setToast(msg); setTimeout(() => setToast(null), 4200); }, []);
     const [, setNow] = useState(Date.now());
-    CAT_USER = (data && data.catMeta) || {};
     const openHistory = useCallback((f) => setHistFilter(f || {}), []);
     const dataRef = useRef(null);
     const undoRef = useRef([]); // [{ before, ts }] session-only, most recent last
@@ -349,7 +369,7 @@ function App() {
         }
         catch { } })();
     }, [data, loaded]);
-    useEffect(() => { dataRef.current = data; }, [data]);
+    useEffect(() => { dataRef.current = data; syncCatUser(data); }, [data]);
     // auto-backup: snapshot on load, every 5 min, and whenever the app goes to background
     useEffect(() => {
         if (!loaded || !data)
@@ -527,6 +547,7 @@ function migrate(d) {
             i.week = fixWk(i.week); });
         d._wkFix = 1;
     }
+    syncCatUser(d);
     d.records || (d.records = {});
     d.positions || (d.positions = []);
     d.timesheets || (d.timesheets = []);
@@ -668,11 +689,6 @@ function Header({ data, setTab, tab, openHistory }) {
                 React.createElement("button", { onClick: () => setTab("settings"), "aria-label": "Settings", style: circBtn },
                     React.createElement(Icon, { name: "gear", size: 18, color: C.textDim }))))));
 }
-function MiniStat({ label, val, tone }) {
-    return (React.createElement("div", { style: { flex: 1, background: C.bgCard, borderRadius: 14, padding: "10px 12px", border: `1px solid ${C.line}` } },
-        React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.3 } }, label),
-        React.createElement("div", { style: { fontSize: 16, fontWeight: 700, color: tone === "green" ? C.green : C.red, marginTop: 2 } }, fmt(val))));
-}
 // ─────────────────────────────────────────────────────────────
 //  ACCOUNTS  —  live balances (checking / savings) + reconciliation
 // ─────────────────────────────────────────────────────────────
@@ -748,14 +764,14 @@ function Accounts({ data, update }) {
 // ─────────────────────────────────────────────────────────────
 //  HOME
 // ─────────────────────────────────────────────────────────────
-function empEntries(data) {
+const empEntries = memoCalc("empEntries", function (data) {
     // Employment work for stats = timesheets (v2) + legacy ABN shifts. net = gross − est.tax − est.super.
     const out = [];
     (data.timesheets || []).filter((t) => t.v === 2).forEach((t) => { const g = Number(t.gross || 0); out.push({ date: t.date, week: t.weekStart || weekKeyOf(t.date || ""), month: (t.weekStart || t.date || "").slice(0, 7), gross: g, hours: Number(t.hours || 0), net: g - Number(t.tax || 0) - Number(t.superAmt || 0) }); });
     (data.uber || []).filter((u) => u.type === "abn").forEach((u) => { const g = Number(u.gross || 0); out.push({ date: u.date, week: weekKeyOf(u.date), month: (u.date || "").slice(0, 7), gross: g, hours: Number(u.hours || 0), net: g }); });
     return out;
-}
-function workSummary(data) {
+});
+const workSummary = memoCalc("workSummary", function (data) {
     const wk = weekKey(0), mo = todayKey().slice(0, 7);
     const fuel = (u) => fuelOf(u, data);
     const superRate = data.tax?.superRate ?? 0.12;
@@ -789,7 +805,7 @@ function workSummary(data) {
         }
     });
     return { week: W, month: M };
-}
+});
 function workRecords(data) {
     const wk = {}, mo = {};
     empEntries(data).forEach((e) => { wk[e.week] = (wk[e.week] || 0) + e.gross; mo[e.month] = (mo[e.month] || 0) + e.gross; });
@@ -798,7 +814,7 @@ function workRecords(data) {
 }
 // SINGLE SOURCE for money-received stats: reads data.income ONLY.
 // TFN → amount (net, gross−withheld). ABN → amount (gross) minus ATO provision = "really yours".
-function moneyStats(data) {
+const moneyStats = memoCalc("moneyStats", function (data) {
     const prov = currentSetAsideRate(data);
     const byMonth = {}, byWeek = {};
     (data.income || []).filter((i) => i.kind === "income").forEach((i) => {
@@ -818,15 +834,15 @@ function moneyStats(data) {
         bestWeek: Math.max(0, ...Object.values(byWeek), 0),
         byMonth,
     };
-}
-function spendMonthly(data) {
+});
+const spendMonthly = memoCalc("spendMonthly", function (data) {
     const m = {};
     (data.spend || []).forEach((s) => { const k = (s.date || "").slice(0, 7); if (k)
         m[k] = (m[k] || 0) + Number(s.amount || 0); });
     (data.payments || []).forEach((p) => { const k = (p.date || "").slice(0, 7); if (k)
         m[k] = (m[k] || 0) + Number(p.amount || 0); });
     return m;
-}
+});
 function computeRecords(data) {
     const ms = moneyStats(data);
     const sm = spendMonthly(data);
@@ -845,76 +861,6 @@ function computeRecords(data) {
 function monthName2(k) { const [y, mo] = (k || "").split("-"); if (!y)
     return ""; return new Date(Number(y), Number(mo) - 1, 1).toLocaleDateString(LOCALE, { month: "long", year: "numeric" }); }
 function pctDiff(cur, base) { return base > 0 ? Math.round(((cur - base) / base) * 100) : null; }
-function incomeInsights(data) {
-    const out = [];
-    const im = moneyStats(data).byMonth;
-    const entries = Object.entries(im);
-    if (!entries.length)
-        return out;
-    const curM = todayKey().slice(0, 7);
-    const best = entries.slice().sort((a, b) => b[1] - a[1])[0];
-    if (best && best[1] > 0)
-        out.push(`Your best income month is ${monthName2(best[0])} (${fmt(best[1])}).`);
-    const past = entries.filter(([k]) => k !== curM).map(([, v]) => v);
-    if (past.length >= 2 && im[curM] != null) {
-        const avg = past.reduce((s, v) => s + v, 0) / past.length;
-        const d = pctDiff(im[curM], avg);
-        if (d != null && Math.abs(d) >= 5)
-            out.push(`This month's income is ${Math.abs(d)}% ${d >= 0 ? "above" : "below"} your monthly average.`);
-    }
-    return out.slice(0, 2);
-}
-function spendInsights(data) {
-    const out = [];
-    const sm = spendMonthly(data);
-    const keys = Object.keys(sm).sort();
-    if (!keys.length)
-        return out;
-    const curM = todayKey().slice(0, 7);
-    const past = keys.filter((k) => k !== curM);
-    if (sm[curM] != null && past.length >= 2) {
-        const avg = past.reduce((s, k) => s + sm[k], 0) / past.length;
-        const d = pctDiff(sm[curM], avg);
-        if (d != null && Math.abs(d) >= 5)
-            out.push(`You're spending ${Math.abs(d)}% ${d < 0 ? "less" : "more"} than your monthly average.`);
-    }
-    // top category trend this month vs last month
-    const monthCat = (mk) => { const c = {}; (data.spend || []).forEach((s) => { if ((s.date || "").slice(0, 7) === mk)
-        c[s.cat || "Other"] = (c[s.cat || "Other"] || 0) + Number(s.amount || 0); }); return c; };
-    const prevM = past.length ? past[past.length - 1] : null;
-    if (prevM) {
-        const cur = monthCat(curM), prev = monthCat(prevM);
-        const top = Object.entries(prev).sort((a, b) => b[1] - a[1])[0];
-        if (top && cur[top[0]] != null) {
-            const d = pctDiff(cur[top[0]], top[1]);
-            if (d != null && Math.abs(d) >= 10)
-                out.push(`Your ${top[0]} spending is ${d < 0 ? "down" : "up"} ${Math.abs(d)}% vs last month.`);
-        }
-    }
-    return out.slice(0, 2);
-}
-function planInsights(data) {
-    const out = [];
-    const goals = (data.goals || []).filter((g) => g.kind === "save" || g.kind === "invest");
-    const g = goals.sort((a, b) => (b.saved / (b.target || 1)) - (a.saved / (a.target || 1)))[0];
-    if (g && g.target > 0) {
-        const pct = Math.min(100, Math.round((g.saved / g.target) * 100));
-        out.push(`${g.name} is ${pct}% funded.`);
-    }
-    const acc = data.accounts || {};
-    const nw = Number(acc.checking || 0) + Number(acc.savings || 0);
-    if (nw > 0)
-        out.push(`Current net worth: ${fmt(nw)} across your accounts.`);
-    return out.slice(0, 2);
-}
-function InsightCard({ lines, tone }) {
-    if (!lines || !lines.length)
-        return null;
-    const col = tone || C.violet;
-    return (React.createElement("div", { style: { background: `${col}14`, border: `1px solid ${col}55`, borderRadius: 14, padding: "12px 14px", marginBottom: 12 } },
-        React.createElement("div", { style: { fontSize: 10, fontWeight: 700, color: col, textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 6 } }, "\u25C6 Insights"),
-        lines.map((l, i) => (React.createElement("div", { key: i, style: { fontSize: 13, color: C.text, lineHeight: 1.45, marginTop: i ? 5 : 0 } }, l)))));
-}
 function RecordChip({ label, value, sub, fresh, raw }) {
     return (React.createElement("div", { style: { flex: 1, minWidth: "45%", background: C.bgCard, border: `1px solid ${fresh ? C.gold : C.line}`, borderRadius: 14, padding: 12, position: "relative" } },
         fresh && React.createElement("div", { style: { position: "absolute", top: 8, right: 10, fontSize: 10, fontWeight: 800, color: C.gold } }, "\uD83C\uDFC6 NEW"),
@@ -941,7 +887,7 @@ function topEmpRate(data) {
     });
     return top;
 }
-function activityRecords(data) {
+const activityRecords = memoCalc("activityRecords", function (data) {
     const fuel = (u) => fuelOf(u, data);
     const superRate = data.tax?.superRate ?? 0.12;
     const rateNow = currentSetAsideRate(data);
@@ -968,7 +914,7 @@ function activityRecords(data) {
         emp: { weekPay: maxV(empWeekPay), monthPay: maxV(empMonthPay), weekH: maxV(empWeekH), monthH: maxV(empMonthH), rate: Math.max(empRate, topEmpRate(data)), avgWeekH: avgV(empWeekH) },
         uber: { day: maxV(ubDay), week: maxV(ubWeek), month: maxV(ubMonth), bestProfit: ubBestProfit, profitHr: ubProfitHr, avgWeek: avgV(ubWeek) },
     };
-}
+});
 function reconcile(data) {
     const sheets = (data.timesheets || []).filter((t) => t.v === 2);
     const incomes = (data.income || []).filter((i) => i.kind === "income" && i.taxSource === "tfn" && i.gross != null);
@@ -980,7 +926,7 @@ function reconcile(data) {
         return { id: i.id, week: wk, employer: i.source || "Employer", est, received, diff: received - est, matched: matched.length };
     }).filter((r) => r.matched > 0).sort((a, b) => (a.week < b.week ? 1 : -1));
 }
-function fySummary(data) {
+const fySummary = memoCalc("fySummary", function (data) {
     const fy = curFY();
     const inFy = (d) => fyKeyOf(d || todayKey()) === fy;
     const tfn = (data.income || []).filter((i) => i.kind === "income" && i.taxSource === "tfn" && i.gross != null && inFy(i.date));
@@ -1000,11 +946,11 @@ function fySummary(data) {
     const marginal = autoMarginalAU(taxable); // next-dollar bracket (incl Medicare)
     const paygRate = tfnGross > 0 ? withheld / tfnGross : 0; // PAYG withholding rate on TFN gross
     return { fy, tfnGross, abnGross, withheld, estTax, carDed, otherDed, taxable, lito, effRate, marginal, paygRate, refund: Math.max(0, withheld - estTax), owe: Math.max(0, estTax - withheld) };
-}
+});
 // ─────────────────────────────────────────────────────────────
 //  UPCOMING COMMITMENTS — reserved cash / free cash forecasting
 // ─────────────────────────────────────────────────────────────
-function computeAccounts(data) {
+const computeAccounts = memoCalc("computeAccounts", function (data) {
     const acc = data.accounts || { checking: 0, savings: 0, asOf: todayKey() };
     const sinceTs = acc.asOfTs || ((acc.asOf || "0000-00-00") + "T23:59:59.999Z");
     const tsOf = (x) => x.ts || ((x.date || x.week || "0000-00-00") + "T12:00:00.000Z");
@@ -1017,7 +963,7 @@ function computeAccounts(data) {
     const checking = Number(acc.checking || 0) + incomeSince - transfersSince - fromChecking;
     const savings = Number(acc.savings || 0) + transfersSince - fromSavings;
     return { checking, savings, total: checking + savings, acc };
-}
+});
 function toWeeklyAmt(amount, cadence) {
     const a = Number(amount) || 0;
     if (cadence === "weekly")
@@ -1105,14 +1051,14 @@ function setAsideThisWeek(data) {
     return (data.commitments?.allocLog || []).filter((a) => weekKeyOf(a.date || "") === wk).reduce((s, a) => s + Number(a.amount || 0), 0);
 }
 function dotC(st) { return st === "red" ? C.red : st === "orange" ? C.gold : C.green; }
-function commitmentsSummary(data) {
+const commitmentsSummary = memoCalc("commitmentsSummary", function (data) {
     const currentCash = computeAccounts(data).total;
     const projects = (data.commitments?.projects || []).filter((p) => !p.done);
     const reserved = projects.reduce((s, p) => s + Number(p.allocated || 0), 0);
     const buffer = livingBuffer(data);
     return { currentCash, reserved, buffer, freeCash: currentCash - reserved - buffer, projects };
-}
-function feasibility(data) {
+});
+const feasibility = memoCalc("feasibility", function (data) {
     const weekly = Number(data.commitments?.weeklySurplus || 0);
     const active = (data.commitments?.projects || []).filter((p) => !p.done);
     const rank = { must: 0, need: 1, want: 2 };
@@ -1159,7 +1105,7 @@ function feasibility(data) {
         res[p.id] = { status, note, need, fundedDate, weeksLeft, perPay };
     });
     return res;
-}
+});
 function uberRatePerHour(data) {
     const rate = currentSetAsideRate(data);
     let profit = 0, hours = 0;
@@ -1195,7 +1141,7 @@ function tfnAutoBaseline(data) {
         return null;
     return Math.max(0, r.tfnRate * r.tfnHrsWk + r.ubRate * r.ubHrsWk - r.bills);
 }
-function weeklyPlan(data) {
+const weeklyPlan = memoCalc("weeklyPlan", function (data) {
     const c = data.commitments || {};
     const baseline = Number(c.weeklySurplus || 0);
     const uberMax = Number(c.uberMax || 0);
@@ -1241,7 +1187,7 @@ function weeklyPlan(data) {
         msg = "Your job covers everything this week.";
     }
     return { required, requiredAll, baseline, uberMax, uberPush, gapAll, status, msg, mustNoDate, uberRate, uberHours };
-}
+});
 function Commitments({ data, update }) {
     const s = commitmentsSummary(data);
     const feas = feasibility(data);
@@ -1475,11 +1421,11 @@ function Home({ data, update, setTab, openHistory, openWork }) {
     const s = commitmentsSummary(data);
     const plan = weeklyPlan(data);
     const curM = todayKey().slice(0, 7);
-    const prevM = (() => { const d = new Date(); d.setMonth(d.getMonth() - 1); return isoLocal(d).slice(0, 7); })();
+    const prevM = prevMonthKey();
     const inNow = ms.byMonth[curM] || 0, inPrev = ms.byMonth[prevM] || 0;
     const spNow = sm[curM] || 0, spPrev = sm[prevM] || 0;
     const net = inNow - spNow, netPrev = inPrev - spPrev;
-    const pctD = (a, b) => (b !== 0 ? ((a - b) / Math.abs(b)) * 100 : a !== 0 ? 100 : 0);
+    const pctD = pctDelta;
     const wkTarget = Number(data.commitments?.weeklyTarget || 0) || plan.requiredAll;
     const setAside = setAsideThisWeek(data);
     const usedPct = wkTarget > 0 ? Math.min(100, (setAside / wkTarget) * 100) : 0;
@@ -1649,71 +1595,6 @@ function Home({ data, update, setTab, openHistory, openWork }) {
         React.createElement("button", { onClick: () => setTab && setTab("plan"), "aria-label": "New", style: { position: "fixed", bottom: 82, right: "max(18px, calc(50% - 262px))", width: 48, height: 48, borderRadius: 99, border: "none", background: C.blue, color: "#fff", fontSize: 22, lineHeight: 1, boxShadow: "0 12px 40px rgba(0,0,0,0.45)", cursor: "pointer", zIndex: 90 } }, "\uFF0B"),
         React.createElement("div", { style: { height: 12 } })));
 }
-function SplitPanel({ data, update, income }) {
-    const [edit, setEdit] = useState(false);
-    const [pctBuf, setPctBuf] = useState({});
-    const alloc = data.allocation || {};
-    const totalPct = FAMILIES.reduce((s, f) => s + Number(alloc[f.key] || 0), 0);
-    const setPct = (key, v) => update((d) => { d.allocation = { ...(d.allocation || {}) }; d.allocation[key] = Math.max(0, Math.min(100, numText(Number(String(v))) || 0)); });
-    useEffect(() => {
-        if (edit) {
-            const b = {};
-            FAMILIES.forEach((f) => (b[f.key] = String(+(Number(alloc[f.key] || 0)).toFixed(2))));
-            setPctBuf(b);
-        }
-    }, [edit]); // eslint-disable-line
-    const curMonth = todayKey().slice(0, 7);
-    const real = {};
-    FAMILIES.forEach((f) => (real[f.key] = 0));
-    [...data.spend, ...data.payments].filter((r) => monthKeyOf(r.date) === curMonth)
-        .forEach((r) => { real[familyOf(r.cat)] += Number(r.amount || 0); });
-    const visible = FAMILIES.filter((f) => edit || Number(alloc[f.key] || 0) > 0 || real[f.key] > 0);
-    return (React.createElement(Card, null,
-        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
-            React.createElement("div", { style: lbl }, "Money split \u2014 target vs real"),
-            React.createElement("button", { onClick: () => setEdit(!edit), style: { ...delBtn, color: edit ? C.green : C.textFaint, fontWeight: 700, fontSize: 13 } }, edit ? "Done" : "✎")),
-        React.createElement("div", { style: { display: "flex", height: 12, borderRadius: 99, overflow: "hidden", marginTop: 12, background: C.bgCardHi } }, FAMILIES.map((f) => React.createElement("div", { key: f.key, style: { width: `${totalPct ? (Number(alloc[f.key] || 0) / totalPct) * 100 : 0}%`, background: f.color, transition: "width .4s" } }))),
-        React.createElement("div", { style: { marginTop: 10 } }, visible.map((f) => {
-            const tPct = Number(alloc[f.key] || 0);
-            const tMo = income * (tPct / 100);
-            const rMo = real[f.key];
-            const rShare = income > 0 ? (rMo / income) * 100 : 0;
-            return (React.createElement("div", { key: f.key, style: { padding: "9px 0", borderTop: `1px solid ${C.line}` } },
-                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                    React.createElement("span", { style: { width: 9, height: 9, borderRadius: 3, background: f.color, flexShrink: 0 } }),
-                    React.createElement("span", { style: { flex: 1, fontSize: 13.5, fontWeight: 600 } }, f.key),
-                    edit ? (React.createElement(React.Fragment, null,
-                        React.createElement("input", { value: pctBuf[f.key] ?? "", inputMode: "decimal", onChange: (e) => { const v = numText(e.target.value); setPctBuf((b) => ({ ...b, [f.key]: v })); setPct(f.key, v); }, style: { ...inp, padding: "7px 9px", width: 54, textAlign: "right", fontSize: 13 } }),
-                        React.createElement("span", { style: { color: C.textFaint, fontWeight: 700 } }, "%"))) : (React.createElement("div", { style: { textAlign: "right" } },
-                        React.createElement("div", { style: { fontSize: 13, fontWeight: 700 } },
-                            tPct,
-                            "% target",
-                            income > 0 && React.createElement("span", { style: { color: C.textFaint, fontSize: 11, fontWeight: 600 } },
-                                " \u00B7 ",
-                                fmt(tMo),
-                                "/mo")),
-                        React.createElement("div", { style: { fontSize: 11, color: C.textDim } },
-                            "real ",
-                            fmt(rMo),
-                            "/mo",
-                            income > 0 ? ` · ${Math.round(rShare)}%` : "")))),
-                !edit && income > 0 && (React.createElement("div", { style: { position: "relative", height: 6, background: C.bgCardHi, borderRadius: 99, marginTop: 7 } },
-                    React.createElement("div", { style: { width: `${Math.min(100, rShare)}%`, height: "100%", background: f.color, borderRadius: 99, transition: "width .4s" } }),
-                    React.createElement("div", { style: { position: "absolute", left: `${Math.min(100, tPct)}%`, top: -2, width: 2, height: 10, background: C.text, opacity: 0.75 } })))));
-        })),
-        edit && (React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 10, fontSize: 12, fontWeight: 700 } },
-            React.createElement("span", { style: { color: C.textDim } }, "Total target"),
-            React.createElement("span", { style: { color: totalPct === 100 ? C.green : C.red } },
-                totalPct,
-                "%",
-                totalPct !== 100 ? `  (${totalPct < 100 ? "+" : ""}${100 - totalPct})` : "  ✓"))),
-        !edit && income === 0 && React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginTop: 10 } }, "Log income + tag expenses to fill this automatically.")));
-}
-function CostBox({ label, val }) {
-    return (React.createElement("div", { style: { flex: 1, background: C.bgCardHi, borderRadius: 12, padding: "12px 14px", border: `1px solid ${C.line}` } },
-        React.createElement("div", { style: { fontSize: 11, color: C.textFaint, fontWeight: 600, textTransform: "uppercase" } }, label),
-        React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: C.text, marginTop: 3 } }, fmt(val))));
-}
 // ─────────────────────────────────────────────────────────────
 //  INCOME
 // ─────────────────────────────────────────────────────────────
@@ -1735,7 +1616,7 @@ function lowBracketRate(fyYear) {
     return 0.16; // FY2025-26 and earlier
 }
 function incomeTaxAU(x, fyYear) {
-    const bands = [[18200, 0], [45000, lowBracketRate(fyYear)], [135000, 0.30], [190000, 0.37], [Infinity, 0.45]];
+    const bands = taxBands(fyYear).map((b) => [b.to, b.rate]);
     let tax = 0, prev = 0;
     for (const [cap, rate] of bands) {
         if (x > prev) {
@@ -1778,10 +1659,6 @@ function fyStartKey() {
     const y = d.getFullYear();
     return (d.getMonth() >= 6 ? y : y - 1) + "-07-01"; // FY starts 1 July
 }
-function fyLabelShort() {
-    const s = Number(fyStartKey().slice(0, 4));
-    return `FY${String(s).slice(2)}–${String(s + 1).slice(2)}`;
-}
 // Marginal next-dollar rate (incl Medicare) at a given cumulative taxable income
 function autoMarginalAU(cum) { return taxOwedAU(cum + 1) - taxOwedAU(cum); }
 // The set-aside rate in effect NOW = max(your manual floor, the auto bracket marginal on current-FY cumulative income).
@@ -1796,19 +1673,14 @@ function currentSetAsideRate(d) {
 function TaxYear({ data, openHistory }) {
     const f = fySummary(data);
     const superPot = Number(data.tax?.superRate || 0.12) * f.abnGross;
-    const BANDS = [
-        { to: 18200, rate: 0, label: "0" },
-        { to: 45000, rate: 0.15, label: "15%" },
-        { to: 135000, rate: 0.30, label: "30%" },
-        { to: 190000, rate: 0.37, label: "37%" },
-    ];
-    const CAP = 190000;
+    const BANDS = taxBands(f.fy && String(f.fy).slice(0, 4) ? Number(String(f.fy).slice(2, 4)) + 2000 : curFY()).filter((b) => isFinite(b.to));
+    const CAP = TAX_CAP;
     const cur = Math.max(0, f.taxable);
     const band = BANDS.find((b) => cur <= b.to) || BANDS[BANDS.length - 1];
     const toNext = Math.max(0, band.to - cur);
     const pos = Math.min(100, (Math.min(cur, CAP) / CAP) * 100);
     const kfmt = (v) => (v >= 1000 ? (v / 1000).toFixed(v % 1000 === 0 ? 0 : 1) + "k" : String(v));
-    const ticks = [{ v: 18200, l: "18.2k" }, { v: 45000, l: "45k" }, { v: 135000, l: "135k+" }];
+    const ticks = BANDS.slice(0, 3).map((b, i) => ({ v: b.to, l: (b.to >= 1000 ? (b.to / 1000).toFixed(b.to % 1000 ? 1 : 0) + "k" : String(b.to)) + (i === 2 ? "+" : "") }));
     const BigCard = ({ tone, icon, label, value, sub, onClick }) => (React.createElement("div", { onClick: onClick, className: "fg-card", style: { background: `${tone}0d`, border: `1px solid ${tone}44`, borderRadius: 18, padding: 16, marginBottom: 12, display: "flex", alignItems: "center", gap: 15, cursor: onClick ? "pointer" : "default" } },
         React.createElement("div", { style: { width: 52, height: 52, borderRadius: 99, border: `1.5px solid ${tone}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } },
             React.createElement(Icon, { name: icon, size: 23, color: tone })),
@@ -3432,33 +3304,6 @@ function compactDollar(v) {
         return `${CURRENCY}${(v / 1000).toFixed(v % 1000 === 0 ? 0 : 1)}k`;
     return `${CURRENCY}${Math.round(v)}`;
 }
-function LineChart({ points, color, points2, color2, legend }) {
-    const W = 340, H = 180, padL = 42, padB = 24, padT = 12, padR = 10;
-    const n = points.length;
-    const allVals = [...points.map((p) => p.value), 0, ...(points2 ? points2.map((p) => p.value) : [])];
-    const top = niceMax(Math.max(...allVals));
-    const X = (i) => (n <= 1 ? (padL + (W - padL - padR) / 2) : padL + i * (W - padL - padR) / (n - 1));
-    const Y = (v) => padT + (1 - v / top) * (H - padT - padB);
-    const pathOf = (pts) => pts.map((p, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(p.value).toFixed(1)}`).join(" ");
-    const grid = [0, 0.25, 0.5, 0.75, 1];
-    const labelEvery = Math.max(1, Math.ceil(n / 6));
-    return (React.createElement("div", null,
-        React.createElement("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", style: { display: "block" } },
-            grid.map((g) => {
-                const yy = padT + g * (H - padT - padB);
-                return (React.createElement("g", { key: g },
-                    React.createElement("line", { x1: padL, y1: yy, x2: W - padR, y2: yy, stroke: C.line, strokeWidth: "1" }),
-                    React.createElement("text", { x: padL - 6, y: yy + 3, textAnchor: "end", fontSize: "9", fill: C.textFaint }, compactDollar(top * (1 - g)))));
-            }),
-            points.map((p, i) => i % labelEvery === 0 || i === n - 1 ? (React.createElement("text", { key: i, x: X(i), y: H - 8, textAnchor: "middle", fontSize: "9", fill: C.textFaint }, p.label)) : null),
-            points2 && n > 1 && React.createElement("path", { d: pathOf(points2), fill: "none", stroke: color2, strokeWidth: "2.5", strokeLinejoin: "round", strokeLinecap: "round" }),
-            n > 1 && React.createElement("path", { d: pathOf(points), fill: "none", stroke: color, strokeWidth: "2.5", strokeLinejoin: "round", strokeLinecap: "round" }),
-            points2 && points2.map((p, i) => React.createElement("circle", { key: "e" + i, cx: X(i), cy: Y(p.value), r: n > 24 ? 0 : 2.6, fill: color2 })),
-            points.map((p, i) => React.createElement("circle", { key: "d" + i, cx: X(i), cy: Y(p.value), r: n > 24 ? 0 : 2.6, fill: color }))),
-        legend && (React.createElement("div", { style: { display: "flex", gap: 16, justifyContent: "center", marginTop: 4 } }, legend.map((l) => (React.createElement("span", { key: l.label, style: { display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, color: C.textDim, fontWeight: 600 } },
-            React.createElement("span", { style: { width: 12, height: 3, borderRadius: 2, background: l.color, display: "inline-block" } }),
-            l.label)))))));
-}
 function Trends({ data, openHistory, update }) {
     const [stat, setStat] = useState("Income");
     const [gran, setGran] = useState("week");
@@ -3524,11 +3369,11 @@ function Trends({ data, openHistory, update }) {
     const acc = computeAccounts(data);
     const rec = activityRecords(data);
     const curM = todayKey().slice(0, 7);
-    const prevM = (() => { const d = new Date(); d.setMonth(d.getMonth() - 1); return isoLocal(d).slice(0, 7); })();
+    const prevM = prevMonthKey();
     const inNow = ms.byMonth[curM] || 0, inPrev = ms.byMonth[prevM] || 0;
     const spNow = sm[curM] || 0, spPrev = sm[prevM] || 0;
     const netNow = inNow - spNow, netPrev = inPrev - spPrev;
-    const pctD = (a, b) => (b > 0 ? ((a - b) / b) * 100 : a > 0 ? 100 : 0);
+    const pctD = pctDelta;
     const health = Math.round(pctD(netNow, netPrev));
     const savRate = inNow > 0 ? (netNow / inNow) * 100 : 0;
     const savPrev = inPrev > 0 ? (netPrev / inPrev) * 100 : 0;
@@ -4241,7 +4086,7 @@ function Statement({ data, onClose }) {
             ".")));
 }
 function monthLabel(m) { const [y, mo] = m.split("-"); return new Date(Number(y), Number(mo) - 1, 1).toLocaleDateString(LOCALE, { month: "short", year: "numeric" }); }
-function allTx(data) {
+const allTx = memoCalc("allTx", function (data) {
     const out = [];
     (data.income || []).forEach((i) => {
         if (i.kind === "reimbursement")
@@ -4255,7 +4100,7 @@ function allTx(data) {
     (data.spend || []).forEach((s) => out.push({ id: s.id, src: "spend", kind: "spend", taxSource: null, date: s.date, label: s.label || "Spend", amount: Number(s.amount || 0), cat: s.cat || "Other", raw: s }));
     (data.payments || []).forEach((p) => out.push({ id: p.id, src: "payment", kind: "spend", taxSource: null, date: p.date, label: p.name || "Fixed cost", amount: Number(p.amount || 0), cat: p.cat || "Fixed", raw: p }));
     return out;
-}
+});
 function History({ data, update, preset, onClose }) {
     const [showF, setShowF] = useState(false);
     const p = preset || {};
@@ -4598,43 +4443,6 @@ function WorkSessionForm({ data, update, showToast, onClose }) {
 // ─────────────────────────────────────────────────────────────
 //  VISUAL COMPONENTS
 // ─────────────────────────────────────────────────────────────
-function Ring({ goal, size = 104, compact = false }) {
-    const pct = Math.min(100, (goal.saved / goal.target) * 100 || 0);
-    const stroke = size < 100 ? 9 : 11;
-    const r = (size - stroke) / 2 - 2, cx = size / 2, cy = size / 2, circ = 2 * Math.PI * r;
-    const col = goalColor(goal.kind);
-    const milestones = [25, 50, 75];
-    return (React.createElement("div", { style: { width: size, textAlign: "center", flexShrink: 0 } },
-        React.createElement("div", { style: { position: "relative", width: size, height: size } },
-            React.createElement("svg", { width: size, height: size, style: { transform: "rotate(-90deg)" } },
-                React.createElement("circle", { cx: cx, cy: cy, r: r, fill: "none", stroke: C.bgCardHi, strokeWidth: stroke }),
-                React.createElement("circle", { cx: cx, cy: cy, r: r, fill: "none", stroke: col, strokeWidth: stroke, strokeLinecap: "round", strokeDasharray: circ, strokeDashoffset: circ - (circ * pct) / 100, style: { transition: "stroke-dashoffset .7s cubic-bezier(.4,0,.2,1)", filter: `drop-shadow(0 0 5px ${col}66)` } }),
-                milestones.map((m) => {
-                    const ang = (m / 100) * 2 * Math.PI, mx = cx + r * Math.cos(ang), my = cy + r * Math.sin(ang);
-                    return React.createElement("circle", { key: m, cx: mx, cy: my, r: 2.4, fill: pct >= m ? "#fff" : C.textFaint });
-                })),
-            React.createElement("div", { style: { position: "absolute", inset: 0, display: "grid", placeItems: "center" } },
-                React.createElement("div", { style: { fontSize: size < 100 ? 18 : 22, fontWeight: 800, color: col } },
-                    Math.round(pct),
-                    "%"))),
-        compact && React.createElement("div", { style: { fontSize: 11.5, fontWeight: 600, color: C.textDim, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, goal.name)));
-}
-function PieChart({ data, total }) {
-    const size = 96, r = 42, cx = 48, cy = 48;
-    let acc = 0;
-    const segs = data.map(([cat, val]) => {
-        const frac = val / total, start = acc * 2 * Math.PI;
-        acc += frac;
-        const end = acc * 2 * Math.PI;
-        const large = end - start > Math.PI ? 1 : 0;
-        const x1 = cx + r * Math.cos(start), y1 = cy + r * Math.sin(start);
-        const x2 = cx + r * Math.cos(end), y2 = cy + r * Math.sin(end);
-        return { d: `M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${large} 1 ${x2},${y2} Z`, col: catTone(cat) };
-    });
-    return (React.createElement("svg", { width: size, height: size, style: { transform: "rotate(-90deg)", flexShrink: 0 } },
-        segs.length === 1 ? React.createElement("circle", { cx: cx, cy: cy, r: r, fill: segs[0].col }) : segs.map((s, i) => React.createElement("path", { key: i, d: s.d, fill: s.col })),
-        React.createElement("circle", { cx: cx, cy: cy, r: r * 0.55, fill: C.bgCard })));
-}
 function Celebration({ goal, onDone }) {
     useEffect(() => { const t = setTimeout(onDone, 3200); return () => clearTimeout(t); }, [onDone]);
     const cols = [C.green, C.gold, C.blue, C.violet, C.pink, C.teal];
@@ -4880,7 +4688,10 @@ const GOAL_ICONS = [
     ["Renovation", "tools", "teal"], ["Motorbike", "motorbike", "orange"], ["Luxury / Watch", "watch", "green"],
     ["Wedding", "ring", "blue"], ["Boat", "boat", "orange"], ["Family / Child", "stroller", "violet"],
 ];
+// Cache de personnalisation des catégories. Écrit uniquement hors rendu
+// (migrate au chargement, effet de persistance à chaque changement) — jamais pendant le render.
 let CAT_USER = {};
+function syncCatUser(d) { CAT_USER = (d && d.catMeta) || {}; }
 const ICON_CHOICES = ["cart", "dining", "fuel", "car", "house", "bolt", "cross", "bag", "cap", "popcorn", "plane", "card", "shield", "invest", "piggy", "heart", "person", "dots"];
 const TONE_CHOICES = ["green", "red", "gold", "blue", "orange", "violet", "teal", "grey"];
 function catIcon(cat) { const u = CAT_USER[cat]; if (u && u.icon)
@@ -4989,12 +4800,6 @@ function FAmount({ value, onChange, placeholder = "0.00" }) {
         React.createElement("span", { style: { position: "absolute", left: 15, top: "50%", transform: "translateY(-50%)", color: C.textDim, fontSize: 15, pointerEvents: "none" } }, "$"),
         React.createElement("input", { value: value, inputMode: "decimal", placeholder: placeholder, onChange: (e) => onChange(numText(e.target.value)), style: { ...FS.field, paddingLeft: 32 } })));
 }
-function FSelect({ icon, tone, value, placeholder, onClick }) {
-    return (React.createElement("button", { onClick: onClick, style: { ...FS.field, display: "flex", alignItems: "center", gap: 11, cursor: "pointer", textAlign: "left" } },
-        icon && React.createElement(Icon, { name: icon, size: 19, color: value ? (tone || C.text) : C.textFaint, stroke: 1.7 }),
-        React.createElement("span", { style: { flex: 1, color: value ? C.text : C.textFaint, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, value || placeholder),
-        React.createElement(Icon, { name: "chevron", size: 16, color: C.textFaint })));
-}
 function FDate({ value, onChange }) {
     return (React.createElement("div", { style: { position: "relative" } },
         React.createElement("input", { type: "date", value: value, onChange: (e) => onChange(e.target.value), style: { ...FS.field, colorScheme: "dark", paddingRight: 44 } }),
@@ -5052,18 +4857,6 @@ function FHead({ title, sub, onClose, right }) {
 }
 function Card({ children, live }) { return React.createElement("div", { className: "fg-card" + (live ? " fg-live" : ""), style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 18, padding: 16, marginBottom: 12 } }, children); }
 function SectionTitle({ children }) { const c = React.useContext(DomainCtx); return React.createElement("div", { style: { ...lbl, color: c, margin: "22px 2px 10px" } }, children); }
-function Hero({ label, value, color, sub, spark, raw }) {
-    return (React.createElement("div", { style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 18, padding: "18px 18px 20px", marginBottom: 6 } },
-        React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8 } }, label),
-        React.createElement("div", { style: { fontSize: 40, fontWeight: 800, color: color || C.text, marginTop: 6, letterSpacing: -1.4, lineHeight: 1.05 } }, raw != null ? React.createElement(Num, { value: raw, format: fmt }) : value),
-        sub && React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 6 } }, sub),
-        spark && spark.length > 1 && React.createElement(Spark, { points: spark, color: color || C.text })));
-}
-function CardHead({ left, right, tone }) {
-    return (React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 8 } },
-        React.createElement("span", { style: { fontSize: 12, color: C.textFaint, fontWeight: 600, textTransform: "uppercase" } }, left),
-        React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: tone === "green" ? C.green : C.red } }, right)));
-}
 function Row({ k, v, tone }) {
     return (React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "5px 0" } },
         React.createElement("span", { style: { fontSize: 14, color: C.textDim } }, k),
@@ -5171,38 +4964,11 @@ function computeStreak(data) {
         count++;
     return { count, lastWeek: weekKey(0), best: Math.max(count, prevBest) };
 }
-function etaText(g) {
-    if (g.saved >= g.target)
-        return "✓ Goal reached";
-    const left = fmt(g.target - g.saved);
-    const contribs = (g.contribs || []).filter((c) => c.delta > 0);
-    if (contribs.length < 2)
-        return `${left} left · ETA: not enough data`;
-    const span = daysBetween(contribs[0].date, contribs[contribs.length - 1].date) / 7;
-    const totalIn = contribs.reduce((s, c) => s + c.delta, 0);
-    if (span < 1 || totalIn <= 0)
-        return `${left} left · ETA: not enough data`;
-    const perWeek = totalIn / span;
-    const weeksLeft = Math.ceil((g.target - g.saved) / perWeek);
-    const eta = new Date();
-    eta.setDate(eta.getDate() + weeksLeft * 7);
-    return `${left} left · ~${eta.toLocaleDateString(LOCALE, { month: "short", year: "numeric" })}`;
-}
 function groupBy(arr, key) { return arr.reduce((a, x) => { (a[x[key]] = a[x[key]] || []).push(x); return a; }, {}); }
-function fullDate() { return new Date().toLocaleDateString(LOCALE, { weekday: "long", day: "numeric", month: "long", year: "numeric" }); }
-function monthName(ym) { const [y, m] = ym.split("-"); return new Date(y, m - 1, 1).toLocaleDateString(LOCALE, { month: "long", year: "numeric" }); }
 function shortDate(d) { if (typeof d !== "string" || !/^\d{4}-\d{2}-\d{2}/.test(d))
     return "—"; const x = new Date(d + "T00:00:00"); return isNaN(x) ? "—" : x.toLocaleDateString(LOCALE, { day: "numeric", month: "short" }); }
 function cadEn(c) { return ({ weekly: "/wk", fortnightly: "/fn", monthly: "/mo", yearly: "/yr" })[c] || ""; }
 function goalColor(kind) { return kind === "debt" ? C.red : kind === "invest" ? C.gold : C.blue; }
-function catColorLegacy(cat) {
-    const map = {
-        "Housing & Bills": C.blue, "Subscriptions": C.violet, "Groceries": C.green,
-        "Going out": C.orange, "Transport": C.gold, "Health & Fitness": C.teal,
-        "Investing & Saving": C.pink, "Other": C.textDim,
-    };
-    return map[cat] || C.textDim;
-}
 const css = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
