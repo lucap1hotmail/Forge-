@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v13.4";
+const APP_VERSION = "v13.5";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -166,10 +166,22 @@ function weekKey(offset = 0) {
 function prevMonthKey() { const d = new Date(); return isoLocal(new Date(d.getFullYear(), d.getMonth() - 1, 1)).slice(0, 7); }
 function pctDelta(a, b) { return b !== 0 ? ((a - b) / Math.abs(b)) * 100 : a !== 0 ? 100 : 0; }
 function monthKeyOf(dateStr) { return typeof dateStr === "string" ? dateStr.slice(0, 7) : ""; }
+// Bucket quinzaine stable et global : change tous les 14 jours, ancré sur un
+// lundi fixe pour que toutes les dépenses "fortnightly" partagent la même
+// grille. Sans ça, periodKey("fortnightly") valait weekKeyOf() — même bucket
+// que "weekly" — et Forge redemandait "Mark paid" chaque semaine au lieu de
+// chaque quinzaine.
+function fortnightKeyOf(dateStr) {
+    const EPOCH_MONDAY = new Date("2020-01-06T00:00:00");
+    const d = new Date((dateStr || todayKey()) + "T00:00:00");
+    const days = Math.floor((d - EPOCH_MONDAY) / 86400000);
+    const idx = Math.floor(days / 14);
+    return isoLocal(new Date(EPOCH_MONDAY.getTime() + idx * 14 * 86400000));
+}
 function periodKey(cadence, dateStr = todayKey()) {
     switch (cadence) {
-        case "weekly":
-        case "fortnightly": return weekKeyOf(dateStr);
+        case "weekly": return weekKeyOf(dateStr);
+        case "fortnightly": return fortnightKeyOf(dateStr);
         case "monthly": return monthKeyOf(dateStr);
         case "yearly": return dateStr.slice(0, 4);
         default: return monthKeyOf(dateStr);
@@ -179,8 +191,10 @@ function paidPeriodLabel(cadence) {
     const d = new Date();
     if (cadence === "yearly")
         return String(d.getFullYear());
-    if (cadence === "weekly" || cadence === "fortnightly")
+    if (cadence === "weekly")
         return "wk " + shortDate(weekKey(0));
+    if (cadence === "fortnightly")
+        return "fn " + shortDate(fortnightKeyOf(todayKey()));
     return d.toLocaleString("en-AU", { month: "short" });
 }
 function hm(h) { const t = Math.max(0, Math.round((Number(h) || 0) * 60)); const H = Math.floor(t / 60), M = t % 60; return M ? `${H}h ${M}m` : `${H}h`; }
@@ -508,6 +522,11 @@ function App() {
 }
 function migrate(d) {
     d.transfers || (d.transfers = []);
+    // Le formulaire "New fixed cost" écrivait `dueDay`, mais nextBillDate lit
+    // `dueDom` : toute dépense mensuelle/annuelle créée par l'app n'a jamais
+    // eu de date d'échéance exploitable. On répare les entrées existantes.
+    if (Array.isArray(d.fixed))
+        d.fixed.forEach((f) => { if (f && f.dueDay != null && f.dueDom == null) { f.dueDom = f.dueDay; delete f.dueDay; } });
     var _a, _b;
     const base = seed();
     d.income || (d.income = []);
@@ -1161,12 +1180,23 @@ const commitmentsSummary = memoCalc("commitmentsSummary", function (data) {
 // la prochaine paie. Volontairement plus prudent que freeCash (WhatIf), qui ne
 // retire que ce qui est déjà mis de côté. Ici on retire ce qu'il reste à
 // mettre de côté — "si je devais tout financer aujourd'hui, il me resterait".
+// Le vrai rab, en continu. RETIRE la part hebdomadaire nécessaire pour tenir
+// chaque échéance (feasibility().perPay), pas le solde total restant : un
+// Visa à $3,000 sur 10 semaines pèse $300/semaine ici, pas $3,000 d'un coup.
+// Avant, spareCash comparait un solde d'AUJOURD'HUI à un besoin de FIN DE
+// PROJET — deux horizons différents — et affichait un déficit qui n'existait
+// pas encore.
 const spareCash = memoCalc("spareCash", function (data) {
     const total = computeAccounts(data).total;
     const buffer = livingBuffer(data);
+    const feas = feasibility(data);
     const projects = (data.commitments?.projects || []).filter((p) => !p.done);
-    const outstanding = projects.reduce((s, p) => s + Math.max(0, num(p.target) - num(p.allocated)), 0);
-    return { total, buffer, outstanding, spare: total - buffer - outstanding, projects: projects.length };
+    let weeklyDue = 0, n = 0;
+    projects.forEach((p) => {
+        const pp = Number((feas[p.id] && feas[p.id].perPay) || 0);
+        if (pp > 0) { weeklyDue += pp; n++; }
+    });
+    return { total, buffer, weeklyDue, n, spare: total - buffer - weeklyDue };
 });
 const feasibility = memoCalc("feasibility", function (data) {
     const weekly = Number(data.commitments?.weeklySurplus || 0);
@@ -1623,7 +1653,7 @@ function Home({ data, update, setTab, openHistory, openWork }) {
         React.createElement(Accounts, { data: data, update: update }),
         (() => {
             const s = spareCash(data);
-            if (s.total <= 0 && s.outstanding <= 0 && s.buffer <= 0)
+            if (s.total <= 0 && s.weeklyDue <= 0 && s.buffer <= 0)
                 return null;
             const row = (k, v, col) => React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "6px 0" } },
                 React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, k),
@@ -1633,9 +1663,9 @@ function Home({ data, update, setTab, openHistory, openWork }) {
                 React.createElement("div", { style: { fontSize: 30, fontWeight: 800, letterSpacing: -0.6, color: s.spare >= 0 ? C.green : C.red, marginBottom: 10 } }, fmt(s.spare)),
                 React.createElement("div", { style: { borderTop: `1px solid ${C.line}`, paddingTop: 6 } },
                     row("Accounts", fmt(s.total)),
-                    s.outstanding > 0 && row(`Commitments still needed (${s.projects})`, "\u2212" + fmt(s.outstanding), C.gold),
+                    s.weeklyDue > 0 && row(`Commitments \u2014 this week's share (${s.n})`, "\u2212" + fmt(s.weeklyDue), C.gold),
                     s.buffer > 0 && row("Bills before next pay", "\u2212" + fmt(s.buffer), C.gold)),
-                s.spare < 0 && React.createElement("div", { style: { fontSize: 11.5, color: C.red, marginTop: 8, fontWeight: 600 } }, "Your accounts don't yet cover everything you've committed to.")));
+                s.spare < 0 && React.createElement("div", { style: { fontSize: 11.5, color: C.red, marginTop: 8, fontWeight: 600 } }, "This week alone outpaces what's in your accounts.")));
         })(),
         React.createElement("div", { className: "fg-card", style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 18, padding: 16, marginBottom: 12 } },
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
@@ -2431,7 +2461,7 @@ function Fixed({ data, update }) {
     const [added, setAdded] = useState(false);
     const [pick, setPick] = useState(null); // "cat" | "acct"
     const [nm, setNm] = useState(""), [amt, setAmt] = useState(""), [cad, setCad] = useState("monthly");
-    const [dueD, setDueD] = useState("1"), [cat, setCat] = useState(""), [acct, setAcct] = useState(""), [note, setNote] = useState("");
+    const [dueD, setDueD] = useState("1"), [dueDow, setDueDow] = useState("5"), [cat, setCat] = useState(""), [acct, setAcct] = useState(""), [note, setNote] = useState("");
     const list = data.fixed || [];
     const isPaid = (f) => (data.payments || []).some((p) => p.fixedId === f.id && p.period === periodKey(f.cadence));
     const allPaid = list.length > 0 && list.every(isPaid);
@@ -2452,7 +2482,7 @@ function Fixed({ data, update }) {
     const submit = () => {
         if (!nm.trim() || !Number(amt))
             return;
-        update((d) => (d.fixed || (d.fixed = [])).unshift({ id: uid(), name: nm.trim(), amount: Number(amt), cadence: cad, cat: cat || "Other", account: acct || "Checking", note: note.trim() || undefined, dueDay: cad === "monthly" || cad === "yearly" ? Number(dueD) || 1 : undefined }));
+        update((d) => (d.fixed || (d.fixed = [])).unshift({ id: uid(), name: nm.trim(), amount: Number(amt), cadence: cad, cat: cat || "Other", account: acct || "Checking", note: note.trim() || undefined, dueDom: cad === "monthly" || cad === "yearly" ? Number(dueD) || 1 : undefined, dueDow: cad === "weekly" || cad === "fortnightly" ? Number(dueDow) : undefined }));
         setNm("");
         setAmt("");
         setCat("");
@@ -2534,6 +2564,9 @@ function Fixed({ data, update }) {
                 (cad === "monthly" || cad === "yearly") && (React.createElement(React.Fragment, null,
                     React.createElement("div", { style: lab }, "Due day of month (1\u201331)"),
                     React.createElement("input", { value: dueD, inputMode: "numeric", onChange: (e) => setDueD(e.target.value.replace(/[^0-9]/g, "").slice(0, 2)), placeholder: "1", style: fld }))),
+                (cad === "weekly" || cad === "fortnightly") && (React.createElement(React.Fragment, null,
+                    React.createElement("div", { style: lab }, "Due day"),
+                    React.createElement("div", { style: { display: "flex", gap: 6 } }, [["1", "Mo"], ["2", "Tu"], ["3", "We"], ["4", "Th"], ["5", "Fr"], ["6", "Sa"], ["0", "Su"]].map(([v, l]) => (React.createElement("button", { key: v, onClick: () => setDueDow(v), style: { flex: 1, padding: "9px 0", borderRadius: 9, border: `1px solid ${dueDow === v ? C.green : C.line}`, background: dueDow === v ? `${C.green}14` : C.bgCardHi, color: dueDow === v ? C.green : C.textDim, fontWeight: dueDow === v ? 600 : 500, fontSize: 12, fontFamily: "inherit", cursor: "pointer" } }, l)))))),
                 React.createElement("div", { style: lab }, "Category"),
                 React.createElement("button", { onClick: () => setPick("cat"), style: { ...fld, display: "flex", alignItems: "center", gap: 11, cursor: "pointer", textAlign: "left" } },
                     React.createElement(Icon, { name: cat ? catIcon(cat) : "house", size: 19, color: cat ? catTone(cat) : C.textFaint, stroke: 1.7 }),
