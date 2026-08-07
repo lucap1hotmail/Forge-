@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v13.6";
+const APP_VERSION = "v13.7";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -1201,6 +1201,19 @@ const commitmentsSummary = memoCalc("commitmentsSummary", function (data) {
 // Avant, spareCash comparait un solde d'AUJOURD'HUI à un besoin de FIN DE
 // PROJET — deux horizons différents — et affichait un déficit qui n'existait
 // pas encore.
+// Ce qu'il faut cette semaine : bills fixes + part hebdo de chaque commitment
+// actif. Extrait de la carte "What you need each week" pour que le Hero et
+// cette carte lisent EXACTEMENT le même total — avant, le Hero comparait à
+// plan.requiredAll (commitments seuls, sans les bills) pendant que cette
+// carte comptait bills + commitments : deux chiffres différents sous le nom
+// "cette semaine", jamais garantis égaux.
+const weekNeed = memoCalc("weekNeed", function (data) {
+    const bills = (data.fixed || []).reduce((a, f) => a + toWeeklyAmt(f.amount, f.cadence), 0);
+    const feas = feasibility(data);
+    const rows = (data.commitments?.projects || []).filter((p) => !p.done && (feas[p.id] || {}).perPay > 0)
+        .map((p) => ({ id: p.id, name: p.name, icon: p.iconName, tone: p.tone, wk: feas[p.id].perPay, due: p.due }));
+    return { bills, rows, total: bills + rows.reduce((a, r) => a + r.wk, 0) };
+});
 const spareCash = memoCalc("spareCash", function (data) {
     const total = computeAccounts(data).total;
     const buffer = livingBuffer(data);
@@ -1758,31 +1771,37 @@ function Home({ data, update, setTab, openHistory, openWork }) {
                 }),
                 React.createElement("div", { style: { fontSize: 11, color: C.textFaint, marginTop: 10, lineHeight: 1.4 } }, "Forge only suggests \u2014 nothing moves unless you push a date yourself.")));
         })(),
-        React.createElement("div", { className: "fg-card", style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 18, padding: 16, marginBottom: 12 } },
-            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
-                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9 } },
-                    React.createElement(Icon, { name: "calendar", size: 17, color: C.gold }),
-                    React.createElement("span", { style: { fontSize: 13, fontWeight: 600, letterSpacing: 0.6, color: C.text, textTransform: "uppercase" } }, "This week")),
-                React.createElement("span", { style: { fontSize: 11, fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase", color: dotC(plan.status), border: `1px solid ${dotC(plan.status)}`, borderRadius: 99, padding: "5px 12px", whiteSpace: "nowrap" } }, statusLabel[plan.status])),
-            React.createElement("div", { style: { fontSize: 34, fontWeight: 700, color: C.text, letterSpacing: -1.1, lineHeight: 1.05, marginTop: 12 } }, React.createElement(Num, { value: setAside, format: fmt })),
-            React.createElement("div", { style: { height: 6, background: C.line, borderRadius: 99, marginTop: 12, overflow: "hidden" } },
-                React.createElement("div", { style: { width: `${Math.max(1.5, usedPct)}%`, height: "100%", background: C.green, borderRadius: 99, transition: "width .5s cubic-bezier(.4,0,.2,1)" } })),
-            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 9 } },
-                React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } },
-                    Math.round(usedPct),
-                    "% of ",
-                    fmt(wkTarget)),
-                React.createElement("span", { style: { fontSize: 12.5, fontWeight: 600, color: setAside >= wkTarget ? C.green : C.gold } }, setAside >= wkTarget ? "Target reached" : `Still missing ${fmt(Math.max(0, wkTarget - setAside))}`))),
         (() => {
-            const bills = (data.fixed || []).reduce((a, f) => a + toWeeklyAmt(f.amount, f.cadence), 0);
-            const rows = commits.filter((p) => (feas[p.id] || {}).perPay > 0)
-                .map((p) => ({ id: p.id, name: p.name, icon: p.iconName, tone: p.tone, wk: feas[p.id].perPay, due: p.due }));
-            const total = bills + rows.reduce((a, r) => a + r.wk, 0);
+            const need = weekNeed(data);
+            const covered = workSummary(data).week.net;
+            const pct = need.total > 0 ? Math.min(100, (covered / need.total) * 100) : 100;
+            const gap = Math.max(0, need.total - covered);
+            const col = covered >= need.total ? C.green : C.gold;
+            const label = covered >= need.total ? "Covered" : "In progress";
+            return (React.createElement("div", { className: "fg-card", style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 18, padding: 16, marginBottom: 12 } },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9 } },
+                        React.createElement(Icon, { name: "calendar", size: 17, color: C.gold }),
+                        React.createElement("span", { style: { fontSize: 13, fontWeight: 600, letterSpacing: 0.6, color: C.text, textTransform: "uppercase" } }, "This week")),
+                    React.createElement("span", { style: { fontSize: 11, fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase", color: col, border: `1px solid ${col}`, borderRadius: 99, padding: "5px 12px", whiteSpace: "nowrap" } }, label)),
+                React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginTop: 12 } }, "Real earnings from your logged work, updated as you fill timesheets"),
+                React.createElement("div", { style: { fontSize: 34, fontWeight: 700, color: C.text, letterSpacing: -1.1, lineHeight: 1.05, marginTop: 6 } }, React.createElement(Num, { value: covered, format: fmt })),
+                React.createElement("div", { style: { height: 6, background: C.line, borderRadius: 99, marginTop: 12, overflow: "hidden" } },
+                    React.createElement("div", { style: { width: `${Math.max(1.5, pct)}%`, height: "100%", background: C.green, borderRadius: 99, transition: "width .5s cubic-bezier(.4,0,.2,1)" } })),
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 9 } },
+                    React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } },
+                        Math.round(pct),
+                        "% of ",
+                        fmt(need.total)),
+                    React.createElement("span", { style: { fontSize: 12.5, fontWeight: 600, color: col } }, covered >= need.total ? "Target reached" : `Still to find ${fmt(gap)}`))));
+        })(),
+        (() => {
+            const { bills, rows, total } = weekNeed(data);
             if (total <= 0)
                 return null;
             const rate = blendedRate(data);
             const h = (v) => (rate > 0 ? `~${Math.ceil(v / rate)} h` : "—");
-            const base = Number(data.commitments?.weeklySurplus || 0);
+            const base = workSummary(data).week.net;
             const gap = Math.max(0, total - base);
             return (React.createElement("div", { className: "fg-card", style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 18, padding: "4px 16px 16px", marginBottom: 12 } },
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, padding: "14px 0 4px" } },
@@ -4124,7 +4143,7 @@ function Settings({ data, setData, onOpenUndo }) {
                 })())),
         React.createElement(MenuSection, { icon: "target", tone: C.violet, title: "Cash flow plan", subtitle: "Set your goals, baseline and payday." },
             React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 4 } },
-                React.createElement("span", { style: { fontSize: 12, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Weekly set-aside target \u2014 the goal shown on your Home This week bar"),
+                React.createElement("span", { style: { fontSize: 12, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Weekly set-aside target \u2014 the goal shown on your Plan This week bar"),
                 React.createElement("input", { value: com.weeklyTarget || "", inputMode: "decimal", placeholder: "$0", onChange: (e) => setCom("weeklyTarget", numOnly(e.target.value)), style: planInp })),
             React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginBottom: 14, lineHeight: 1.5 } }, "Progress = what you allocate to goals during the week. Set 0 to hide the bar and show only your goals' real need."),
             React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 4 } },
