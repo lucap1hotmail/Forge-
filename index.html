@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v14.2";
+const APP_VERSION = "v14.3";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -822,8 +822,9 @@ function Accounts({ data, update }) {
                 React.createElement("div", { style: { fontSize: 26, fontWeight: 800, color: val > 0 ? C.text : C.gold, marginTop: 8, letterSpacing: -0.8 } }, fmt(val)),
                 React.createElement("div", { style: { marginTop: 10, marginLeft: -15, marginRight: -15 } },
                     React.createElement(Sparkline, { points: series, color: C.blue })))))),
-            React.createElement("div", { style: { display: "flex", justifyContent: "center", marginTop: 14 } },
-                React.createElement("button", { onClick: openXfer, style: { background: "transparent", border: "none", color: C.blue, fontWeight: 700, fontSize: 13.5, cursor: "pointer" } }, "Transfer \u21C4")),
+            React.createElement("div", { style: { display: "flex", justifyContent: "center", gap: 22, marginTop: 14 } },
+                React.createElement("button", { onClick: openXfer, style: { background: "transparent", border: "none", color: C.blue, fontWeight: 700, fontSize: 13.5, cursor: "pointer" } }, "Transfer \u21C4"),
+                React.createElement("button", { onClick: open, style: { background: "transparent", border: "none", color: C.gold, fontWeight: 700, fontSize: 13.5, cursor: "pointer" } }, "Set balance \u270E")),
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14 } },
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7 } },
                     React.createElement("span", { style: { color: C.gold, display: "flex" } },
