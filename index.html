@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v14.11";
+const APP_VERSION = "v14.14";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -390,10 +390,24 @@ function App() {
     useEffect(() => {
         if (!loaded || !data)
             return;
-        (async () => { try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-        }
-        catch { } })();
+        (async () => {
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+            }
+            catch (e) {
+                // Avant ce correctif, un échec ici était totalement silencieux :
+                // rien ne persistait, rien ne prévenait. Une session entière de
+                // saisies pouvait ne jamais survivre à un redémarrage sans que
+                // personne ne le sache. On retente une fois (utile si c'était
+                // transitoire), puis on prévient clairement si ça persiste.
+                try {
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+                }
+                catch (e2) {
+                    showToast && showToast({ title: "\u26A0\uFE0F Not saved to this device", lines: ["Your last changes aren't being saved.", "Export a backup now (Settings \u2192 Save backup) before closing the app."] });
+                }
+            }
+        })();
     }, [data, loaded]);
     useEffect(() => { dataRef.current = data; syncCatUser(data); }, [data]);
     // auto-backup: snapshot on load, every 5 min, and whenever the app goes to background
@@ -2432,7 +2446,7 @@ function Fixed({ data, update }) {
         if (i >= 0)
             d.payments.splice(i, 1);
         else
-            d.payments.unshift({ id: uid(), kind: "payment", fixedId: f.id, name: f.name, cat: f.cat, amount: Number(f.amount || 0), period: per, date: todayKey(), week: weekKeyOf(todayKey()), account: f.account });
+            d.payments.unshift({ id: uid(), kind: "payment", fixedId: f.id, name: f.name, cat: f.cat, amount: Number(f.amount || 0), period: per, date: todayKey(), ts: nowTs(), week: weekKeyOf(todayKey()), account: f.account });
     });
     const confirmPaid = (f) => { togglePaid(f); setSheet(null); setMarked(f.id); setTimeout(() => setMarked(null), 1400); };
     const del = (id) => update((d) => { d.fixed = (d.fixed || []).filter((f) => f.id !== id); });
@@ -4766,8 +4780,12 @@ const FS = {
     field: { width: "100%", boxSizing: "border-box", background: C.bgCardHi, border: `1px solid ${C.line}`, borderRadius: 12, color: C.text, fontSize: 15, padding: "14px 15px", fontFamily: "inherit", outline: "none" },
     label: { fontSize: 11.5, fontWeight: 600, letterSpacing: 0.6, color: C.textDim, textTransform: "uppercase", margin: "18px 0 8px" },
 };
+// La virgule est un séparateur de milliers (format d'affichage de fmt : virgule
+// milliers, point décimal) — on la RETIRE, on ne la convertit jamais en point.
+// Avant ce correctif, "3,386.22" devenait "3.38622" ($3.39 au lieu de
+// $3,386.22) : la virgule était traitée comme un second point décimal.
 function numText(v) {
-    let x = String(v).replace(/,/g, ".").replace(/[^0-9.]/g, "");
+    let x = String(v).replace(/,/g, "").replace(/[^0-9.]/g, "");
     const i = x.indexOf(".");
     if (i >= 0)
         x = x.slice(0, i + 1) + x.slice(i + 1).replace(/\./g, "");
