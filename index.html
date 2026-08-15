@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v14.14";
+const APP_VERSION = "v14.15";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -4780,12 +4780,29 @@ const FS = {
     field: { width: "100%", boxSizing: "border-box", background: C.bgCardHi, border: `1px solid ${C.line}`, borderRadius: 12, color: C.text, fontSize: 15, padding: "14px 15px", fontFamily: "inherit", outline: "none" },
     label: { fontSize: 11.5, fontWeight: 600, letterSpacing: 0.6, color: C.textDim, textTransform: "uppercase", margin: "18px 0 8px" },
 };
-// La virgule est un séparateur de milliers (format d'affichage de fmt : virgule
-// milliers, point décimal) — on la RETIRE, on ne la convertit jamais en point.
-// Avant ce correctif, "3,386.22" devenait "3.38622" ($3.39 au lieu de
-// $3,386.22) : la virgule était traitée comme un second point décimal.
+// Deux conventions à gérer, pas une seule — mon avant-dernier correctif n'en
+// gérait qu'une et cassait l'autre :
+//   - Format anglais, milliers+décimal : "3,386.22" → un point existe déjà,
+//     toute virgule est donc un séparateur de milliers → on la retire.
+//   - Clavier français, virgule décimale : "267,2" ou "34,49" → aucun point,
+//     1 ou 2 chiffres après la virgule → c'est le décimal → on le convertit.
+//   - Nombre rond anglais SANS décimale : "1,600" → aucun point, mais
+//     exactement 3 chiffres après la virgule → jamais un vrai décimal (une
+//     devise n'a jamais 3 chiffres après la virgule) → séparateur de
+//     milliers, on fusionne sans le point.
+// Sans cette distinction fine, un clavier français ne pouvait plus taper
+// aucune décimale ("267,2" → "2672"), ou un montant rond anglais devenait un
+// faux décimal à 3 chiffres ("1,600" → "1.600").
 function numText(v) {
-    let x = String(v).replace(/,/g, "").replace(/[^0-9.]/g, "");
+    let x = String(v);
+    if (x.includes(".")) {
+        x = x.replace(/,/g, "");
+    }
+    else {
+        x = x.replace(/,(\d{3})(?!\d)/g, "$1"); // ",XXX" en fin de groupe → milliers
+        x = x.replace(",", "."); // la virgule restante, s'il y en a une, est le décimal
+    }
+    x = x.replace(/[^0-9.]/g, "");
     const i = x.indexOf(".");
     if (i >= 0)
         x = x.slice(0, i + 1) + x.slice(i + 1).replace(/\./g, "");
