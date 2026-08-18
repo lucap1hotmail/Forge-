@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v14.23";
+const APP_VERSION = "v14.26";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -1503,11 +1503,11 @@ function Commitments({ data, update }) {
     const tgtPct = wkTarget > 0 ? Math.min(100, (setAside / wkTarget) * 100) : 0;
     const tgtLeft = Math.max(0, wkTarget - setAside);
     return (React.createElement(React.Fragment, null,
-        React.createElement(Card, null,
+        React.createElement("div", { className: "fg-card", style: { background: `linear-gradient(155deg, ${C.blue}2e 0%, ${C.blue}12 42%, ${C.bgCard} 88%)`, border: `1px solid ${C.blue}55`, borderRadius: 18, padding: 16, marginBottom: 12 } },
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9 } },
-                    React.createElement("span", { style: { color: C.gold, display: "flex" } },
-                        React.createElement(Icon, { name: "calendar", size: 18, color: C.gold })),
+                    React.createElement("span", { style: { color: C.blue, display: "flex" } },
+                        React.createElement(Icon, { name: "calendar", size: 18, color: C.blue })),
                     React.createElement("span", { style: { fontSize: 14.5, fontWeight: 800, color: C.text, letterSpacing: 0.3 } }, "THIS WEEK")),
                 React.createElement("span", { style: { fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: dot[pwPlan.status], border: `1px solid ${dot[pwPlan.status]}`, borderRadius: 99, padding: "6px 13px", background: "transparent", whiteSpace: "nowrap" } }, statusLabel[pwPlan.status])),
             wkTarget > 0 ? (React.createElement(React.Fragment, null,
@@ -1536,7 +1536,7 @@ function Commitments({ data, update }) {
             s.projects.map((p, idx) => {
                 const st = feas[p.id] || { status: "green", note: "", need: 0, perPay: 0 };
                 const wst = commitmentWeekStatus(data, p);
-                const wMeta = { on_track: { l: "On Track", c: C.gold }, complete: { l: "Complete", c: C.green }, ahead: { l: "Ahead", c: C.blue }, behind: { l: "Behind", c: C.red } }[wst.status];
+                const wMeta = { on_track: { l: "On Track", c: C.green }, complete: { l: "Complete", c: C.green }, ahead: { l: "Ahead", c: C.blue }, behind: { l: "Behind", c: C.red } }[wst.status];
                 const pct = p.target > 0 ? Math.min(100, (Number(p.allocated || 0) / p.target) * 100) : 0;
                 const open = openId === p.id;
                 return (React.createElement("div", { key: p.id, style: { padding: "15px 0", borderTop: idx === 0 ? "none" : `1px solid ${C.line}` } },
@@ -2851,8 +2851,8 @@ function Plan({ data, update, onCelebrate }) {
             React.createElement("div", { style: { minWidth: 0 } },
                 React.createElement("span", { style: { fontSize: 27, fontWeight: 800, color: C.text, letterSpacing: -0.6 } }, "Plan"),
                 React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 4 } }, "Build your future, one step at a time.")),
-            React.createElement("button", { onClick: () => setGoalOpen(true), style: { display: "flex", alignItems: "center", gap: 8, background: C.gold, border: "none", borderRadius: 14, padding: "13px 18px", color: "#1a1407", fontSize: 15, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 } },
-                React.createElement(Icon, { name: "plus", size: 17, color: "#1a1407" }),
+            React.createElement("button", { onClick: () => setGoalOpen(true), style: { display: "flex", alignItems: "center", gap: 8, background: C.blue, border: "none", borderRadius: 14, padding: "13px 18px", color: "#fff", fontSize: 15, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 } },
+                React.createElement(Icon, { name: "plus", size: 17, color: "#fff" }),
                 "New goal")),
         (() => {
             const goals = data.goals || [];
@@ -2906,12 +2906,12 @@ function Plan({ data, update, onCelebrate }) {
                                         fmt(25)),
                                     React.createElement("button", { onClick: () => del(g.id), style: { flex: 1, padding: "10px 0", borderRadius: 10, border: `1px solid ${C.line}`, background: "transparent", color: C.red, fontWeight: 700, fontSize: 13, fontFamily: "inherit", cursor: "pointer" } }, "Delete"))))));
                     }),
-                    React.createElement("button", { onClick: () => setGoalOpen(true), style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 9, width: "100%", padding: "14px 0", borderRadius: 14, border: `1px solid ${C.line}`, background: "transparent", color: C.gold, fontSize: 15, fontWeight: 700, fontFamily: "inherit", cursor: "pointer" } },
-                        React.createElement(Icon, { name: "plus", size: 17, color: C.gold }),
+                    React.createElement("button", { onClick: () => setGoalOpen(true), style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 9, width: "100%", padding: "14px 0", borderRadius: 14, border: `1px solid ${C.line}`, background: "transparent", color: C.blue, fontSize: 15, fontWeight: 700, fontFamily: "inherit", cursor: "pointer" } },
+                        React.createElement(Icon, { name: "plus", size: 17, color: C.blue }),
                         "Create new goal")),
                 React.createElement(Card, null,
                     React.createElement("div", { style: { marginBottom: 10 } },
-                        React.createElement("span", { style: { fontSize: 11.5, fontWeight: 800, letterSpacing: 0.7, color: C.gold, textTransform: "uppercase" } },
+                        React.createElement("span", { style: { fontSize: 11.5, fontWeight: 800, letterSpacing: 0.7, color: C.blue, textTransform: "uppercase" } },
                             "Commitments (",
                             (data.commitments?.projects || []).filter((p) => !p.done).length,
                             ")"),
