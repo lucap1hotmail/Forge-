@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v14.26";
+const APP_VERSION = "v14.30";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -1150,8 +1150,9 @@ function livingBuffer(data) {
     return dated + estimate;
 }
 function setAsideThisWeek(data) {
-    const wk = weekKeyOf(todayKey());
-    return (data.commitments?.allocLog || []).filter((a) => weekKeyOf(a.date || "") === wk).reduce((s, a) => s + Number(a.amount || 0), 0);
+    const paydayDow = data.commitments?.paydayDow ?? 4;
+    const wk = payWeekKeyOf(todayKey(), paydayDow);
+    return (data.commitments?.allocLog || []).filter((a) => payWeekKeyOf(a.date || "", paydayDow) === wk).reduce((s, a) => s + Number(a.amount || 0), 0);
 }
 const commitmentsSummary = memoCalc("commitmentsSummary", function (data) {
     const currentCash = computeAccounts(data).total;
@@ -1250,7 +1251,13 @@ function commitmentWeekStatus(data, p) {
     return { weekKey: curKey, required: remaining / weeksLeft, allocatedThisWeek: 0, status: "on_track", locked: false, weeksLeft };
 }
 const feasibility = memoCalc("feasibility", function (data) {
-    const weekly = Number(data.commitments?.weeklySurplus || 0);
+    // Capacité hebdo réelle disponible POUR les commitments = take-home réel
+    // moins les factures fixes réelles — jamais le champ manuel
+    // data.commitments.weeklySurplus (déconnecté de la réalité). À ne pas
+    // confondre avec weeklyEarnNeed().surplus, qui lui est DÉJÀ net des
+    // commitments (réservé aux objectifs/épargne) : ici on teste justement
+    // si les commitments sont finançables, donc on part d'avant eux.
+    const weekly = Math.max(0, workSummary(data).week.net - weeklyEarnNeed(data).fixedWeekly);
     const active = (data.commitments?.projects || []).filter((p) => !p.done);
     const rank = { must: 0, need: 1, want: 2 };
     const order = [...active].sort((a, b) => ((rank[a.priority] ?? 1) - (rank[b.priority] ?? 1)) ||
@@ -1268,7 +1275,6 @@ const feasibility = memoCalc("feasibility", function (data) {
         const dueDay = p.due ? new Date(p.due + "T00:00:00") : null;
         const due = p.due ? new Date(p.due + "T23:59:59") : null;
         const weeksLeft = dueDay ? Math.max(1, Math.ceil((dueDay - today) / (7 * DAY_MS))) : null;
-        const perPay = (weeksLeft && need > 0) ? need / weeksLeft : 0;
         let status = "green", note = "On track";
         if (need <= 0) {
             status = "green";
@@ -1293,7 +1299,7 @@ const feasibility = memoCalc("feasibility", function (data) {
                 note = p.priority === "must" ? "Won't make the date" : "Push the date";
             }
         }
-        res[p.id] = { status, note, need, fundedDate, weeksLeft, perPay };
+        res[p.id] = { status, note, need, fundedDate, weeksLeft };
     });
     return res;
 });
@@ -1376,9 +1382,31 @@ const payWeekPlan = memoCalc("payWeekPlan", function (data) {
     }
     return { required, allocatedThisWeek, short, status, msg };
 });
+// Combien gagner en moyenne par semaine pour tout couvrir — factures fixes
+// ramenées à leur équivalent hebdo (toWeeklyAmt, pas ce qui tombe avant la
+// prochaine paie) + la part hebdo verrouillée de TOUS les commitments actifs
+// (non terminés, peu importe leur priorité — "actifs" = pas juste Must).
+// Somme directement via commitmentWeekStatus, PAS via payWeekPlan : ce
+// dernier ne filtre que les Must non-flexibles pour son propre badge
+// d'alerte sur Plan, une question différente ("dois-je m'inquiéter cette
+// semaine") de celle-ci ("combien gagner en moyenne chaque semaine").
+// Un chiffre lisse et moyen, délibérément DIFFÉRENT de "Bills before next
+// pay" (qui, lui, ne regarde que ce qui tombe avant la prochaine paie
+// précise) — les deux ne doivent jamais s'additionner, ni se recouper : ce
+// calcul ne touche jamais safeToSpend, les comptes, ou Total Cash.
+const weeklyEarnNeed = memoCalc("weeklyEarnNeed", function (data) {
+    const fixedWeekly = (data.fixed || []).reduce((s, f) => s + toWeeklyAmt(Number(f.amount) || 0, f.cadence), 0);
+    const activeCommits = (data.commitments?.projects || []).filter((p) => !p.done);
+    const commitWeekly = activeCommits.reduce((s, p) => s + commitmentWeekStatus(data, p).required, 0);
+    const total = fixedWeekly + commitWeekly;
+    const takeHome = workSummary(data).week.net;
+    return { fixedWeekly, commitWeekly, total, takeHome, surplus: takeHome - total };
+});
 const weeklyPlan = memoCalc("weeklyPlan", function (data) {
     const c = data.commitments || {};
-    const baseline = Number(c.weeklySurplus || 0);
+    // Même capacité réelle qu'utilisée par feasibility() — jamais le champ
+    // manuel c.weeklySurplus, déconnecté de la réalité.
+    const baseline = Math.max(0, workSummary(data).week.net - weeklyEarnNeed(data).fixedWeekly);
     const uberMax = Number(c.uberMax || 0);
     const active = (c.projects || []).filter((p) => !p.done);
     const today = new Date();
@@ -2939,7 +2967,7 @@ function Plan({ data, update, onCelebrate }) {
                                 React.createElement("span", { style: { fontSize: 12, fontWeight: on ? 600 : 500, color: on ? col : C.textDim } }, l)));
                         })),
                         Number(target) > 0 && (() => {
-                            const base = Number(data.commitments?.weeklySurplus || 0) || 100;
+                            const base = Math.max(0, weeklyEarnNeed(data).surplus) || 100;
                             const wks = Math.ceil(Number(target) / base);
                             return (React.createElement("div", { style: { marginTop: 18 } },
                                 React.createElement(FSummary, { tone: C.green, title: "To reach target", rows: [[`Weekly`, fmt(base) + " /wk", C.green], [`Monthly`, fmt(base * 4.33) + " /mo", C.green], [`Left`, Math.max(1, Math.round(wks / 4.33)) + " months", C.text]] })));
@@ -3080,7 +3108,17 @@ function Tax({ data, update, openWork, openHistory, setTab }) {
                         ["Est. take-home", fmt(net), C.green],
                     ].map(([lb, v, vc], i) => (React.createElement("div", { key: lb, style: { flex: 1, minWidth: 0, paddingLeft: i === 0 ? 0 : 16, borderLeft: i === 0 ? "none" : `1px solid ${C.line}`, textAlign: i === 0 ? "left" : "left" } },
                         React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint } }, lb),
-                        React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: vc, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, v)))))),
+                        React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: vc, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, v))))),
+                    (() => {
+                        const wen = weeklyEarnNeed(data);
+                        const surplus = wen.surplus;
+                        return React.createElement("div", { style: { display: "flex", marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.line}` } }, [
+                            ["Weekly need", fmt(wen.total), C.gold],
+                            ["Weekly surplus", (surplus >= 0 ? "" : "\u2212") + fmt(Math.abs(surplus)), surplus >= 0 ? C.green : C.red],
+                        ].map(([lb, v, vc], i) => (React.createElement("div", { key: lb, style: { flex: 1, minWidth: 0, paddingLeft: i === 0 ? 0 : 16, borderLeft: i === 0 ? "none" : `1px solid ${C.line}` } },
+                            React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint } }, lb),
+                            React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: vc, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, v)))));
+                    })()),
                 React.createElement(Card, null,
                     React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 } },
                         React.createElement("span", { style: { fontSize: 11.5, fontWeight: 800, letterSpacing: 0.7, color: C.blue, textTransform: "uppercase" } }, "Records"),
@@ -3808,7 +3846,6 @@ function Settings({ data, setData, setTab, onOpenUndo }) {
     const setRate = (k, v) => setData((prev) => { const val = Math.max(0, Math.min(1, numText((Number(String(v))) || 0) / 100)); const tax = { ...(prev.tax || {}), [k]: val }; if (k === "taxRate")
         tax.rateFY = fyStartKey(); return { ...prev, tax }; });
     const update = (fn) => setData((prev) => { const c = structuredClone(prev); fn(c); return c; });
-    const [frz, setFrz] = useState(null); // null | "confirm" | {n,r}
     return (React.createElement("div", { style: { padding: "8px 16px 0" } },
         React.createElement("div", { style: { margin: "2px 0 18px" } },
             React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 9 } },
@@ -3826,7 +3863,7 @@ function Settings({ data, setData, setTab, onOpenUndo }) {
                     React.createElement("b", null, "this financial year only"),
                     " \u2014 it auto-clears each 1 July, then the rate follows the ATO brackets automatically (and rises on its own past $18,200 / $45,000). Set it whenever you want to force a minimum; it never changes the past. Super % is your ABN self-provision rate. ",
                     React.createElement("b", null, "Fuel $/L: update it each time you fill up"),
-                    " \u2014 every shift keeps the price that was set when you logged it, so past shifts never change."),
+                    " \u2014 each new shift uses this price automatically. Past shifts keep their own frozen price unless you tap \"Apply\" below."),
                 React.createElement("div", { style: { display: "flex", gap: 10 } },
                     React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                         React.createElement("div", { style: { ...lbl, marginBottom: 6 } }, "ABN set-aside %"),
@@ -3836,49 +3873,11 @@ function Settings({ data, setData, setTab, onOpenUndo }) {
                         React.createElement("input", { value: superStr, inputMode: "decimal", onChange: (e) => { const v = numText(e.target.value); setSuperStr(v); setRate("superRate", v); }, style: inp })),
                     React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                         React.createElement("div", { style: { ...lbl, marginBottom: 6 } }, "Fuel $/L"),
-                        React.createElement("input", { value: fuelStr, inputMode: "decimal", placeholder: "0", onChange: (e) => { const v = numText(e.target.value); setFuelStr(v); setData((prev) => ({ ...prev, tax: { ...(prev.tax || {}), fuelPrice: Math.max(0, Number(v) || 0) } })); }, style: inp }))),
+                        React.createElement("input", { value: fuelStr, inputMode: "decimal", placeholder: "0", onChange: (e) => { const v = numText(e.target.value); setFuelStr(v); const price = Math.max(0, Number(v) || 0); setData((prev) => { const tk = todayKey(); return { ...prev, tax: { ...(prev.tax || {}), fuelPrice: price }, uber: (prev.uber || []).map((u) => (u.date >= tk ? { ...u, fuelPrice: price } : u)) }; }); }, style: inp }))),
                 React.createElement("div", { style: { marginTop: 10 } },
                     React.createElement("div", { style: { ...lbl, marginBottom: 6 } }, "Other work deductions ($/yr) \u2014 tools, boots, PPE, union, phone\u2026"),
                     React.createElement("input", { value: dedStr, inputMode: "decimal", placeholder: "0", onChange: (e) => { const v = numText(e.target.value); setDedStr(v); setData((prev) => ({ ...prev, tax: { ...(prev.tax || {}), otherDeductions: Math.max(0, Number(v) || 0) } })); }, style: inp }),
-                    React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 5, lineHeight: 1.5 } }, "Reduces estimated taxable income (on top of the car cents/km deduction). Keep receipts \u2014 verify claims with the ATO.")),
-                (() => {
-                    const n = (data.uber || []).length;
-                    const r = Math.round(currentSetAsideRate(data) * 100);
-                    if (frz && frz.done) {
-                        return React.createElement("div", { style: { marginTop: 12, padding: "12px", borderRadius: 10, border: `1px solid ${C.green}`, background: `${C.green}18`, color: C.green, fontWeight: 700, fontSize: 13, textAlign: "center" } },
-                            "\u2713 Applied ",
-                            frz.r,
-                            "% to ",
-                            frz.n,
-                            " shift",
-                            frz.n > 1 ? "s" : "");
-                    }
-                    if (frz === "confirm") {
-                        return (React.createElement("div", { style: { marginTop: 12 } },
-                            React.createElement("div", { style: { fontSize: 13, color: C.gold, fontWeight: 600, marginBottom: 8, textAlign: "center" } },
-                                "Apply ",
-                                r,
-                                "% to all ",
-                                n,
-                                " shift",
-                                n > 1 ? "s" : "",
-                                "? Overwrites their frozen rate."),
-                            React.createElement("div", { style: { display: "flex", gap: 8 } },
-                                React.createElement("button", { onClick: () => { setData((prev) => { const rate = currentSetAsideRate(prev); return { ...prev, uber: (prev.uber || []).map((u) => ({ ...u, taxRate: rate })) }; }); setFrz({ done: true, n, r }); setTimeout(() => setFrz(null), 3500); }, style: { flex: 1, padding: "12px 0", borderRadius: 10, border: "none", background: C.gold, color: "#1a1407", fontWeight: 800, fontSize: 14, fontFamily: "inherit", cursor: "pointer" } },
-                                    "Apply ",
-                                    r,
-                                    "%"),
-                                React.createElement("button", { onClick: () => setFrz(null), style: { flex: 1, padding: "12px 0", borderRadius: 10, border: `1px solid ${C.line}`, background: C.bgCardHi, color: C.textDim, fontWeight: 700, fontSize: 14, fontFamily: "inherit", cursor: "pointer" } }, "Cancel"))));
-                    }
-                    return React.createElement("button", { onClick: () => { if (!n) {
-                            setFrz({ done: true, n: 0, r });
-                            setTimeout(() => setFrz(null), 2500);
-                            return;
-                        } setFrz("confirm"); }, style: { width: "100%", marginTop: 12, padding: "11px", borderRadius: 10, border: `1px solid ${C.gold}`, background: `${C.gold}18`, color: C.gold, fontWeight: 700, fontSize: 13, fontFamily: "inherit", cursor: "pointer" } },
-                        "Apply current rate (",
-                        r,
-                        "%) to all shifts");
-                })())),
+                    React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 5, lineHeight: 1.5 } }, "Reduces estimated taxable income (on top of the car cents/km deduction). Keep receipts \u2014 verify claims with the ATO.")))),
         React.createElement(MenuSection, { icon: "target", tone: C.violet, title: "Cash flow plan", subtitle: "Set your goals, baseline and payday." },
             React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 4 } },
                 React.createElement("span", { style: { fontSize: 12, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Weekly set-aside target \u2014 the goal shown on your Plan This week bar"),
