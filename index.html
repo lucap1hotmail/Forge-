@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v14.30";
+const APP_VERSION = "v14.32";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -124,7 +124,7 @@ const seed = () => ({
     accounts: { checking: 0, savings: 0, asOf: todayKey(), asOfTs: nowTs() },
     commitments: { projects: [], weeklySurplus: 0, paydayDow: 4, bufferOverride: null, uberMax: 0, weeklyTarget: 0, allocLog: [] },
     backup: { last: null, reminderDays: 7 },
-    categories: ["Housing & Bills", "Subscriptions", "Groceries", "Going out", "Transport", "Health & Fitness", "Saving", "Investing", "Other"],
+    categories: ["Housing & Bills", "Subscriptions", "Groceries", "Going out", "Transport", "Fuel", "Health & Fitness", "Saving", "Investing", "Other"],
 });
 // ── helpers ──────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2, 10); }
@@ -636,6 +636,15 @@ function migrate(d) {
         delete d.allocation["Debt payback"];
     ["fixed", "spend", "payments"].forEach((k) => (d[k] || []).forEach((it) => { if (it.cat && REMAP[it.cat])
         it.cat = REMAP[it.cat]; }));
+    // Fuel séparé du reste : toute dépense dont le libellé est (à l'espace/casse
+    // près) exactement "Fuel" passe dans sa propre catégorie, peu importe où
+    // elle avait été rangée avant (Transport, Groceries, ...). Volontairement
+    // strict — un "BP" ou "7eleven" à 10-20$ ressemble plus à un café qu'à un
+    // plein, on ne reclasse pas au jugé sur un nom de marque seul.
+    if (!d.categories.includes("Fuel"))
+        d.categories = [...d.categories, "Fuel"];
+    ["spend", "payments"].forEach((k) => (d[k] || []).forEach((it) => { if (it.label && /^fuel$/i.test(String(it.label).trim()))
+        it.cat = "Fuel"; }));
     // ── FORGE 7.4 — Work Session foundation (additive migration; not yet wired to UI) ──
     d.sessions || (d.sessions = []);
     const seen = new Set(d.sessions.map((s) => s.origin).filter(Boolean));
@@ -822,6 +831,21 @@ function fortnightCycleKeyOf(dateStr, data) {
     const idx = Math.floor(days / 14);
     return isoLocal(new Date(anchor.getTime() + idx * 14 * 86400000));
 }
+// Plafond visa 48h/quinzaine : TFN + ABN combinés, sur la même quinzaine
+// ancrée que uberHoursTally — mais Munster en est exclu (ses heures ne
+// comptent pas dans le plafond). Identifié par nom, pas par id codé en dur :
+// si le poste est recréé un jour, ça continue de fonctionner.
+const visaHoursTally = memoCalc("visaHoursTally", function (data) {
+    const fnStart = fortnightCycleKeyOf(todayKey(), data);
+    const fnEnd = isoLocal(new Date(new Date(fnStart + "T00:00:00").getTime() + 13 * DAY_MS));
+    const munster = (data.positions || []).find((p) => String(p.name || "").trim().toLowerCase() === "munster");
+    const tfnHours = (data.timesheets || []).filter((t) => t.v === 2 && (!munster || t.profileId !== munster.id) && fortnightCycleKeyOf(t.date, data) === fnStart).reduce((s, t) => s + Number(t.hours || 0), 0);
+    const abnHours = (data.uber || []).filter((u) => fortnightCycleKeyOf(u.date, data) === fnStart).reduce((s, u) => s + Number(u.hours || 0), 0);
+    const hours = tfnHours + abnHours;
+    const cap = 48;
+    const status = hours >= cap ? "over" : hours >= cap * 0.85 ? "near" : "ok";
+    return { hours, tfnHours, abnHours, cap, start: fnStart, end: fnEnd, status };
+});
 const uberHoursTally = memoCalc("uberHoursTally", function (data) {
     const wk = weekKey(0);
     const fnStart = fortnightCycleKeyOf(todayKey(), data);
@@ -1759,8 +1783,8 @@ function Home({ data, update, setTab, openHistory, openWork }) {
                     React.createElement("div", { style: { borderTop: "1px solid rgba(255,255,255,.14)", marginTop: 16, paddingTop: 4 } },
                         iconRow("bank", C.blue, "Checking", fmt(checking)),
                         iconRow("piggy", C.green, "Savings", fmt(savings)),
-                        (sts.hardBills > 0 || sts.reserved > 0) && React.createElement("div", { style: { borderTop: "1px solid rgba(255,255,255,.1)", margin: "4px 0" } }),
-                        sts.hardBills > 0 && iconRow("doc", C.red, "Bills before next pay", "\u2212" + fmt(sts.hardBills)),
+                        React.createElement("div", { style: { borderTop: "1px solid rgba(255,255,255,.1)", margin: "4px 0" } }),
+                        iconRow("doc", sts.hardBills > 0 ? C.red : "#fff", "Bills before next pay", sts.hardBills > 0 ? "\u2212" + fmt(sts.hardBills) : fmt(0)),
                         sts.reserved > 0 && iconRow("lock", C.gold, "Commitments reserved", "\u2212" + fmt(sts.reserved))),
                     React.createElement("div", { style: { borderTop: "1px solid rgba(255,255,255,.14)", marginTop: 4, paddingTop: 14, display: "flex", alignItems: "center" } },
                         React.createElement("button", { onClick: openXfer, style: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, background: "transparent", border: "none", color: C.blue, fontWeight: 700, fontSize: 13.5, cursor: "pointer" } },
@@ -3102,6 +3126,31 @@ function Tax({ data, update, openWork, openHistory, setTab }) {
                             React.createElement(Icon, { name: "calendar", size: 14, color: C.text }),
                             "Timesheets",
                             React.createElement(Icon, { name: "chevron", size: 13, color: C.textDim })))),
+                (() => {
+                    const vt = visaHoursTally(data);
+                    const vCol = vt.status === "over" ? C.red : vt.status === "near" ? C.gold : C.green;
+                    const vBg = vt.status === "over" ? `${C.red}18` : vt.status === "near" ? `${C.gold}18` : C.bgCard;
+                    const vBorder = vt.status === "over" ? C.red : vt.status === "near" ? C.gold : C.line;
+                    return React.createElement("div", { className: "fg-card", style: { background: vBg, border: `1px solid ${vBorder}`, borderRadius: 18, padding: 16, marginBottom: 12 } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+                            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, minWidth: 0 } },
+                                React.createElement(Icon, { name: vt.status === "over" ? "cross" : "shield", size: 18, color: vCol }),
+                                React.createElement("div", { style: { minWidth: 0 } },
+                                    React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, color: vt.status === "ok" ? C.text : vCol } },
+                                        vt.status === "over" ? "Over your visa cap" : vt.status === "near" ? "Approaching your visa cap" : "Visa hours"),
+                                    React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginTop: 2 } },
+                                        shortDate(vt.start),
+                                        " \u2013 ",
+                                        shortDate(vt.end),
+                                        " \u00B7 excl. Munster"))),
+                            React.createElement("div", { style: { fontSize: 18, fontWeight: 800, color: vCol, whiteSpace: "nowrap", flexShrink: 0 } },
+                                Math.round(vt.hours * 10) / 10,
+                                "h / ",
+                                vt.cap,
+                                "h")),
+                        React.createElement("div", { style: { height: 6, background: C.bgCardHi, borderRadius: 99, marginTop: 12, overflow: "hidden" } },
+                            React.createElement("div", { style: { width: `${Math.max(2, Math.min(100, (vt.hours / vt.cap) * 100))}%`, height: "100%", background: vCol, borderRadius: 99, transition: "width .5s cubic-bezier(.4,0,.2,1)" } })));
+                })(),
                 React.createElement(Card, null,
                     React.createElement("div", { style: { display: "flex" } }, [
                         ["Gross pay", fmt(gross), C.text],
