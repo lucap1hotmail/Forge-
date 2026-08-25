@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v14.32";
+const APP_VERSION = "v14.33";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -645,6 +645,16 @@ function migrate(d) {
         d.categories = [...d.categories, "Fuel"];
     ["spend", "payments"].forEach((k) => (d[k] || []).forEach((it) => { if (it.label && /^fuel$/i.test(String(it.label).trim()))
         it.cat = "Fuel"; }));
+    // Plafond visa 48h/quinzaine : chaque poste (et Uber) devient une vraie
+    // bascule dans Settings, plus jamais un nom codé en dur. Valeur de
+    // départ posée UNE SEULE FOIS ici pour ne rien casser au moment du
+    // passage : ce qui comptait déjà avant continue de compter, ce qui était
+    // exclu (Munster) reste exclu — ensuite, c'est entièrement lui qui
+    // décide via l'interrupteur, plus jamais devinée par le code.
+    (d.positions || []).forEach((p) => { if (p.countsForVisa == null)
+        p.countsForVisa = String(p.name || "").trim().toLowerCase() !== "munster"; });
+    if (d.tax && d.tax.uberCountsForVisa == null)
+        d.tax.uberCountsForVisa = true;
     // ── FORGE 7.4 — Work Session foundation (additive migration; not yet wired to UI) ──
     d.sessions || (d.sessions = []);
     const seen = new Set(d.sessions.map((s) => s.origin).filter(Boolean));
@@ -832,15 +842,17 @@ function fortnightCycleKeyOf(dateStr, data) {
     return isoLocal(new Date(anchor.getTime() + idx * 14 * 86400000));
 }
 // Plafond visa 48h/quinzaine : TFN + ABN combinés, sur la même quinzaine
-// ancrée que uberHoursTally — mais Munster en est exclu (ses heures ne
-// comptent pas dans le plafond). Identifié par nom, pas par id codé en dur :
-// si le poste est recréé un jour, ça continue de fonctionner.
+// ancrée que uberHoursTally — mais seuls les postes (et Uber) marqués
+// countsForVisa=true comptent. Plus aucun nom codé en dur : chaque poste a sa
+// propre bascule dans Settings, réglable à tout moment, pour n'importe quel
+// poste créé aujourd'hui ou demain.
 const visaHoursTally = memoCalc("visaHoursTally", function (data) {
     const fnStart = fortnightCycleKeyOf(todayKey(), data);
     const fnEnd = isoLocal(new Date(new Date(fnStart + "T00:00:00").getTime() + 13 * DAY_MS));
-    const munster = (data.positions || []).find((p) => String(p.name || "").trim().toLowerCase() === "munster");
-    const tfnHours = (data.timesheets || []).filter((t) => t.v === 2 && (!munster || t.profileId !== munster.id) && fortnightCycleKeyOf(t.date, data) === fnStart).reduce((s, t) => s + Number(t.hours || 0), 0);
-    const abnHours = (data.uber || []).filter((u) => fortnightCycleKeyOf(u.date, data) === fnStart).reduce((s, u) => s + Number(u.hours || 0), 0);
+    const excludedIds = new Set((data.positions || []).filter((p) => p.countsForVisa === false).map((p) => p.id));
+    const tfnHours = (data.timesheets || []).filter((t) => t.v === 2 && !excludedIds.has(t.profileId) && fortnightCycleKeyOf(t.date, data) === fnStart).reduce((s, t) => s + Number(t.hours || 0), 0);
+    const uberCounts = data.tax?.uberCountsForVisa !== false;
+    const abnHours = uberCounts ? (data.uber || []).filter((u) => fortnightCycleKeyOf(u.date, data) === fnStart).reduce((s, u) => s + Number(u.hours || 0), 0) : 0;
     const hours = tfnHours + abnHours;
     const cap = 48;
     const status = hours >= cap ? "over" : hours >= cap * 0.85 ? "near" : "ok";
@@ -2077,7 +2089,12 @@ function PositionManager({ data, update, kind }) {
                     "min",
                     p.otCap ? ` · OT >${p.otCap}h/${p.otBasis === "day" ? "day" : "wk"} ×${p.otMult}` : "",
                     p.ot2Cap ? ` · ×${p.ot2Mult} >${p.ot2Cap}h` : "",
-                    (p.satMult || p.sunMult || p.holMult) ? ` · Sat×${p.satMult || "–"} Sun×${p.sunMult || "–"} Hol×${p.holMult || "–"}` : "")),
+                    (p.satMult || p.sunMult || p.holMult) ? ` · Sat×${p.satMult || "–"} Sun×${p.sunMult || "–"} Hol×${p.holMult || "–"}` : ""),
+                React.createElement("button", { onClick: (e) => { e.stopPropagation(); update((d) => { const pp = d.positions.find((x) => x.id === p.id); if (pp)
+                        pp.countsForVisa = !pp.countsForVisa; }); }, style: { display: "flex", alignItems: "center", gap: 6, marginTop: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" } },
+                    React.createElement("span", { style: { width: 30, height: 17, borderRadius: 99, background: p.countsForVisa ? C.blue : C.line, position: "relative", flexShrink: 0, transition: "background .15s" } },
+                        React.createElement("span", { style: { position: "absolute", top: 2, left: p.countsForVisa ? 15 : 2, width: 13, height: 13, borderRadius: 99, background: "#fff", transition: "left .15s" } })),
+                    React.createElement("span", { style: { fontSize: 11.5, color: C.textFaint } }, "Counts toward visa hours cap"))),
             React.createElement("button", { onClick: () => del(p.id), style: delBtn }, "\u2715")))))),
         dash && React.createElement(EmployerDashboard, { profile: dash, data: data, onClose: () => setDash(null) })));
 }
@@ -3923,6 +3940,10 @@ function Settings({ data, setData, setTab, onOpenUndo }) {
                     React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                         React.createElement("div", { style: { ...lbl, marginBottom: 6 } }, "Fuel $/L"),
                         React.createElement("input", { value: fuelStr, inputMode: "decimal", placeholder: "0", onChange: (e) => { const v = numText(e.target.value); setFuelStr(v); const price = Math.max(0, Number(v) || 0); setData((prev) => { const tk = todayKey(); return { ...prev, tax: { ...(prev.tax || {}), fuelPrice: price }, uber: (prev.uber || []).map((u) => (u.date >= tk ? { ...u, fuelPrice: price } : u)) }; }); }, style: inp }))),
+                React.createElement("button", { onClick: () => setData((prev) => ({ ...prev, tax: { ...(prev.tax || {}), uberCountsForVisa: !(prev.tax?.uberCountsForVisa) } })), style: { display: "flex", alignItems: "center", gap: 6, marginTop: 12, background: "transparent", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" } },
+                    React.createElement("span", { style: { width: 30, height: 17, borderRadius: 99, background: data.tax?.uberCountsForVisa ? C.blue : C.line, position: "relative", flexShrink: 0, transition: "background .15s" } },
+                        React.createElement("span", { style: { position: "absolute", top: 2, left: data.tax?.uberCountsForVisa ? 15 : 2, width: 13, height: 13, borderRadius: 99, background: "#fff", transition: "left .15s" } })),
+                    React.createElement("span", { style: { fontSize: 11.5, color: C.textFaint } }, "Uber counts toward visa hours cap")),
                 React.createElement("div", { style: { marginTop: 10 } },
                     React.createElement("div", { style: { ...lbl, marginBottom: 6 } }, "Other work deductions ($/yr) \u2014 tools, boots, PPE, union, phone\u2026"),
                     React.createElement("input", { value: dedStr, inputMode: "decimal", placeholder: "0", onChange: (e) => { const v = numText(e.target.value); setDedStr(v); setData((prev) => ({ ...prev, tax: { ...(prev.tax || {}), otherDeductions: Math.max(0, Number(v) || 0) } })); }, style: inp }),
