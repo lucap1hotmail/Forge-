@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v15.15";
+const APP_VERSION = "v16.1";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -124,7 +124,7 @@ const seed = () => ({
     accounts: { checking: 0, savings: 0, asOf: todayKey(), asOfTs: nowTs() },
     commitments: { projects: [], weeklySurplus: 0, paydayDow: 4, bufferOverride: null, uberMax: 0, weeklyTarget: 0, allocLog: [] },
     backup: { last: null, reminderDays: 7 },
-    categories: ["Housing & Bills", "Subscriptions", "Groceries", "Going out", "Transport", "Fuel", "Health & Fitness", "Saving", "Investing", "Other"],
+    categories: ["Housing & Bills", "Subscriptions", "Groceries", "Going out", "Transport", "Fuel", "Health & Fitness", "Saving", "Investing", "Travel", "Work", "Other"],
 });
 // ── helpers ──────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2, 10); }
@@ -600,6 +600,34 @@ function migrate(d) {
     d.rateRecords || (d.rateRecords = { tfnGross: 0, tfnNet: 0, abnGross: 0, abnNet: 0 });
     d.backup || (d.backup = { last: null, reminderDays: 7 });
     d.tax = { taxRate: 0.32, superRate: 0.12, fuelPrice: 0, cons: 0, bag: 0, otherDeductions: 0, ...(d.tax && typeof d.tax === "object" ? d.tax : {}) };
+    // V16 — dette fiscale ABN. Deliberement HORS de commitments.projects :
+    // elle n'a pas de cible figee, elle grossit a chaque shift. Latente par
+    // defaut : suivie et affichee, mais elle n'impose aucun rythme hebdo et
+    // ne touche donc ni `reserved`, ni `commitWeekly`, ni le Runway. Elle
+    // s'active a la main une fois le visa regle.
+    if (!d.taxDebt || typeof d.taxDebt !== "object")
+        d.taxDebt = { active: false, dueDate: null };
+    // V16 — deux categories ajoutees une seule fois, comme Fuel avant elles.
+    if (!d._catV16Seeded) {
+        d.categories = Array.isArray(d.categories) ? d.categories : [];
+        for (const c of ["Travel", "Work"])
+            if (!d.categories.includes(c))
+                d.categories.splice(Math.max(0, d.categories.length - 1), 0, c);
+        d._catV16Seeded = true;
+    }
+    // Les projets crees avec l'ancien lot goals portent des icones qui
+    // n'existent plus. On les remappe une fois vers l'equivalent le plus
+    // proche du jeu unique, sinon ils s'afficheraient sans icone.
+    if (!d._iconV16Mapped) {
+        for (const p of (d.commitments && d.commitments.projects) || []) {
+            const m = LEGACY_ICON_MAP[p.iconName] || LEGACY_ICON_MAP[p.icon];
+            if (m) {
+                p.icon = m;
+                p.iconName = m;
+            }
+        }
+        d._iconV16Mapped = true;
+    }
     // Manual rate lives for one FY: tag it on first sight; on a new FY, clear the floor (back to pure progressive).
     const _fy = fyStartKey();
     if (d.tax.rateFY == null)
@@ -755,7 +783,7 @@ function useTotals(data) {
         // ABN super provision (separate envelope, not a tax deduction): 12% of ABN payouts this FY
         const fyStart = fyStartKey();
         const abnPayoutsFY = data.income.filter((i) => i.kind === "income" && i.taxSource === "abn" && (i.date || "") >= fyStart).reduce((s, i) => s + Number(i.amount || 0), 0);
-        const superPot = abnPayoutsFY * superRate;
+        const superPot = fySummary(data).superPot;
         const fixedMonthly = data.fixed.reduce((s, f) => s + toMonthly(Number(f.amount || 0), f.cadence), 0);
         const fixedWeekly = fixedMonthly * 12 / 52;
         const payWeek = data.payments.filter((p) => weekKeyOf(p.date) === curWeek).reduce((s, p) => s + Number(p.amount || 0), 0);
@@ -904,7 +932,7 @@ const workSummary = memoCalc("workSummary", function (data) {
     });
     (data.uber || []).filter((u) => (u.type || "uber") === "uber").forEach((u) => {
         const h = Number(u.hours || 0), g = Number(u.gross || 0);
-        const n = g - g * (u.taxRate != null ? u.taxRate : rateNow) - g * superRate - fuel(u);
+        const n = g - g * (u.taxRate != null ? u.taxRate : rateNow) - fuel(u);
         if (weekKeyOf(u.date) === wk) {
             W.hours += h;
             W.gross += g;
@@ -923,7 +951,7 @@ const workSummary = memoCalc("workSummary", function (data) {
         lastWeekNet += Number(e.net || 0); });
     (data.uber || []).filter((u) => (u.type || "uber") === "uber" && weekKeyOf(u.date) === lw).forEach((u) => {
         const g = Number(u.gross || 0);
-        lastWeekNet += g - g * (u.taxRate != null ? u.taxRate : rateNow) - g * superRate - fuel(u);
+        lastWeekNet += g - g * (u.taxRate != null ? u.taxRate : rateNow) - fuel(u);
     });
     return { week: W, month: M, lastWeekNet };
 });
@@ -1058,12 +1086,38 @@ const fySummary = memoCalc("fySummary", function (data) {
     const carDed = Math.min(km, KM_CAP) * KM_RATE;
     const otherDed = Math.max(0, Number(data.tax?.otherDeductions) || 0);
     const taxable = Math.max(0, tfnGross + Math.max(0, abnGross - carDed) - otherDed);
-    const estTax = estAnnualTax(taxable, fy);
-    const lito = litoAU(taxable);
-    const effRate = taxable > 0 ? estTax / taxable : 0; // estimated annual effective rate
-    const marginal = autoMarginalAU(taxable); // next-dollar bracket (incl Medicare)
-    const paygRate = tfnGross > 0 ? withheld / tfnGross : 0; // PAYG withholding rate on TFN gross
-    return { fy, tfnGross, abnGross, withheld, estTax, carDed, otherDed, taxable, lito, effRate, marginal, paygRate, refund: Math.max(0, withheld - estTax), owe: Math.max(0, estTax - withheld) };
+    // V16 — le bareme s'applique a un revenu ANNUEL. Lui passer le cumul
+    // depuis le 1er juillet renvoyait 0 tant qu'on etait sous 18 200 : Forge
+    // ne provisionnait RIEN sur l'ABN et annoncait meme un remboursement.
+    // On annualise le rythme observe, puis on ramene au prorata ecoule.
+    // Plancher de 28 jours : sur 3 jours de donnees une grosse semaine
+    // projetterait 182 000/an, donc la tranche a 45%. Verifie en simulation,
+    // au-dela de 28 jours plancher et annualisation brute coincident.
+    const elapsedDays = Math.max(1, Math.round((new Date(todayKey()) - new Date(fyStartKey())) / 864e5) + 1);
+    const el = elapsedDays / 365;
+    const elFloor = Math.max(elapsedDays, 28) / 365;
+    const annTaxable = taxable / elFloor;
+    const annTax = estAnnualTax(annTaxable, fy);
+    const estTax = annTax * el; // impot COURU a ce jour, comparable a `withheld`
+    const net = estTax - withheld; // > 0 : du ; < 0 : trop-percu
+    // Taux imputable a l'ABN = impot(total) - impot(TFN seul). L'ABN s'empile
+    // AU-DESSUS du salaire, il se paie donc dans les tranches hautes. Un taux
+    // marginal serait une approximation ; ceci est le vrai surcout.
+    const annTfn = tfnGross / elFloor;
+    const abnTaxAnn = Math.max(0, annTax - estAnnualTax(annTfn, fy));
+    const abnBaseAnn = Math.max(0, abnGross - carDed) / elFloor;
+    const abnRate = abnBaseAnn > 0 ? Math.max(0, Math.min(0.47, abnTaxAnn / abnBaseAnn)) : 0;
+    // Enveloppe super : base UNIQUE. Trois ecrans la calculaient sur trois
+    // bases differentes, 557 d'ecart. Elle ne sort plus du net d'un shift :
+    // Luca ne la verse pas, ce n'est donc pas une charge du shift, mais une
+    // epargne a laquelle il renonce. Elle reste suivie, a part.
+    const superPot = Math.max(0, abnGross) * (Number(data.tax?.superRate) || 0.12);
+    const projFYEnd = Math.max(0, annTax - (el > 0 ? withheld / el : 0));
+    const lito = litoAU(annTaxable);
+    const effRate = taxable > 0 ? estTax / taxable : 0;
+    const marginal = autoMarginalAU(annTaxable);
+    const paygRate = tfnGross > 0 ? withheld / tfnGross : 0;
+    return { fy, tfnGross, abnGross, abnShifts, abnPayouts, withheld, estTax, annTax, annTaxable, elapsedDays, abnRate, superPot, projFYEnd, carDed, otherDed, taxable, lito, effRate, marginal, paygRate, refund: Math.max(0, -net), owe: Math.max(0, net) };
 });
 // ─────────────────────────────────────────────────────────────
 //  UPCOMING COMMITMENTS — reserved cash / free cash forecasting
@@ -1362,13 +1416,54 @@ const payWeekPlan = memoCalc("payWeekPlan", function (data) {
 // pay" (qui, lui, ne regarde que ce qui tombe avant la prochaine paie
 // précise) — les deux ne doivent jamais s'additionner, ni se recouper : ce
 // calcul ne touche jamais safeToSpend, les comptes, ou Total Cash.
+// V16 — etat de la dette fiscale. Vivante : le stock est recalcule a chaque
+// fois depuis fySummary, jamais fige. `flow` est ce qu'elle accumule par
+// semaine au rythme actuel : sans lui, provisionner 210 pendant qu'elle
+// grossit de 251 ressemble a un recul alors que c'est un progres.
+const taxDebtStatus = memoCalc("taxDebtStatus", function (data) {
+    const f = fySummary(data);
+    const td = data.taxDebt || { active: false, dueDate: null };
+    const stock = f.owe;
+    const weeksElapsed = Math.max(1, f.elapsedDays / 7);
+    const flow = stock / weeksElapsed;
+    let weeksLeft = null, weeklyRequired = 0;
+    if (td.active && td.dueDate) {
+        weeksLeft = Math.max(1, Math.ceil((new Date(td.dueDate) - new Date(todayKey())) / 6048e5));
+        weeklyRequired = stock / weeksLeft;
+    }
+    return { active: !!td.active, dueDate: td.dueDate || null, stock, flow, projFYEnd: f.projFYEnd, weeksLeft, weeklyRequired };
+});
+// Net encaisse sur une fenetre GLISSANTE de 7 jours. La semaine calendaire
+// remettait le compteur a zero chaque lundi : le surplus affichait alors le
+// besoin hebdo complet en negatif (-1152 sur ses donnees) alors que rien
+// n'allait mal. Verifie en simulation : le dimanche soir les deux methodes
+// donnent le meme chiffre, on ne perd donc aucune information.
+const rolling7Net = memoCalc("rolling7Net", function (data) {
+    const end = todayKey(), start = new Date(new Date(end) - 6 * 864e5).toISOString().slice(0, 10);
+    const inWin = (k) => (k || "") >= start && (k || "") <= end;
+    const rate = currentSetAsideRate(data);
+    let net = 0;
+    for (const i of data.income || [])
+        if (i.kind === "income" && i.taxSource !== "abn" && inWin(i.date))
+            net += Number(i.amount || 0);
+    for (const u of data.uber || [])
+        if ((u.type || "uber") === "uber" && inWin(u.date)) {
+            const g = Number(u.gross || 0);
+            net += g - g * (u.taxRate != null ? u.taxRate : rate) - fuelOf(u, data);
+        }
+    return net;
+});
 const weeklyEarnNeed = memoCalc("weeklyEarnNeed", function (data) {
     const fixedWeekly = (data.fixed || []).reduce((s, f) => s + toWeeklyAmt(Number(f.amount) || 0, f.cadence), 0);
     const activeCommits = (data.commitments?.projects || []).filter((p) => !p.done);
     const commitWeekly = activeCommits.reduce((s, p) => s + commitmentWeekStatus(data, p).required, 0);
     const total = fixedWeekly + commitWeekly;
-    const takeHome = workSummary(data).week.net;
-    return { fixedWeekly, commitWeekly, total, takeHome, surplus: takeHome - total };
+    // `total` reste fixedWeekly + commitWeekly. La dette fiscale est exposee
+    // a cote dans `taxWeekly`, jamais fondue dedans : c'est ce qui garantit
+    // qu'elle reste dissociable partout, et que le Runway de Home ne bouge pas.
+    const taxWeekly = taxDebtStatus(data).weeklyRequired;
+    const takeHome = rolling7Net(data);
+    return { fixedWeekly, commitWeekly, total, taxWeekly, totalWithTax: total + taxWeekly, takeHome, surplus: takeHome - total, surplusAfterTax: takeHome - total - taxWeekly };
 });
 // Runway : si les revenus s'arrêtaient aujourd'hui, combien de semaines le
 // cash actuel couvre-t-il le coût structurel moyen (factures fixes +
@@ -1808,17 +1903,19 @@ function fyStartKey() {
 // Marginal next-dollar rate (incl Medicare) at a given cumulative taxable income
 function autoMarginalAU(cum) { return taxOwedAU(cum + 1) - taxOwedAU(cum); }
 // The set-aside rate in effect NOW = max(your manual floor, the auto bracket marginal on current-FY cumulative income).
+// V16 — le taux de provision ABN vient du bareme progressif complet via
+// fySummary.abnRate, plus d'un taux marginal calcule sur le cumul depuis le
+// 1er juillet (qui renvoyait 0 pendant tout le debut d'exercice).
+// `manual` reste un plancher que Luca peut imposer dans Settings.
 function currentSetAsideRate(d) {
-    const fyStart = fyStartKey();
-    const tfnG = (d.income || []).filter((i) => i.kind === "income" && i.taxSource !== "abn" && i.gross != null && (i.date || "") >= fyStart).reduce((s, i) => s + (Number(i.gross) || 0), 0);
-    const abnG = (d.uber || []).filter((u) => (u.date || "") >= fyStart).reduce((s, u) => s + (Number(u.gross) || 0), 0);
-    const auto = autoMarginalAU(tfnG + abnG);
-    const manual = Number(d.tax?.taxRate) || 0; // manual floor; cleared physically at FY rollover (see migrate)
+    const auto = fySummary(d).abnRate;
+    const manual = Number(d.tax?.taxRate) || 0;
     return Math.max(manual, auto);
 }
 function TaxYear({ data, openHistory }) {
     const f = fySummary(data);
-    const superPot = Number(data.tax?.superRate || 0.12) * f.abnGross;
+    const superPot = f.superPot;
+    const td = taxDebtStatus(data);
     const BANDS = taxBands(f.fy && String(f.fy).slice(0, 4) ? Number(String(f.fy).slice(2, 4)) + 2000 : curFY()).filter((b) => isFinite(b.to));
     const CAP = TAX_CAP;
     const cur = Math.max(0, f.taxable);
@@ -1871,6 +1968,7 @@ function TaxYear({ data, openHistory }) {
                     fmt(toNext),
                     " to the next bracket"))),
         React.createElement(BigCard, { tone: C.green, icon: "doc", label: "Set aside for tax return", value: fmt(f.owe), sub: `Tax owed so far ${fmt(f.owe)} · already withheld ${fmt(f.withheld)}`, onClick: () => openHistory && openHistory({ flow: "income" }) }),
+        React.createElement(BigCard, { tone: td.stock > 0 ? C.gold : C.textFaint, icon: "shield", label: td.active ? "ABN tax debt \u00B7 active" : "ABN tax debt \u00B7 tracked", value: fmt(td.stock), sub: `Grows ${fmt(td.flow)}/wk at your current pace \u00B7 projected ${fmt(td.projFYEnd)} by 30 June` + (td.active && td.weeksLeft ? ` \u00B7 ${fmt(td.weeklyRequired)}/wk over ${td.weeksLeft} weeks` : " \u00B7 no weekly target while tracked") }),
         React.createElement(BigCard, { tone: C.blue, icon: "shield", label: "Super to set aside (separate)", value: fmt(superPot), sub: `${Math.round((data.tax?.superRate || 0.12) * 100)}% of ABN gross (${fmt(f.abnGross)}) — your own super envelope, not a tax deduction.`, onClick: () => openHistory && openHistory({ tax: "abn" }) }),
         React.createElement(Card, null,
             React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: 0.6, color: C.textDim, textTransform: "uppercase", marginBottom: 4 } }, "By source"),
@@ -2177,7 +2275,7 @@ function WeeklyWorkLog({ data, openHistory }) {
         return; if (!wk[k])
         wk[k] = { hours: 0, gross: 0, net: 0 }; wk[k].hours += h; wk[k].gross += g; wk[k].net += n; };
     empEntries(data).forEach((e) => add(e.week, e.hours, e.gross, e.net));
-    (data.uber || []).filter((u) => (u.type || "uber") === "uber").forEach((u) => { const g = Number(u.gross || 0); add(weekKeyOf(u.date), Number(u.hours || 0), g, g - g * (u.taxRate != null ? u.taxRate : rateNow) - g * superRate - fuel(u)); });
+    (data.uber || []).filter((u) => (u.type || "uber") === "uber").forEach((u) => { const g = Number(u.gross || 0); add(weekKeyOf(u.date), Number(u.hours || 0), g, g - g * (u.taxRate != null ? u.taxRate : rateNow) - fuel(u)); });
     const keys = Object.keys(wk).sort().reverse();
     if (keys.length === 0)
         return null;
@@ -2392,14 +2490,22 @@ function Income({ data, update, openHistory, showToast, setTab }) {
                     "Filter",
                     React.createElement(Icon, { name: "filter", size: 14, color: C.textDim }))),
             (() => {
-                const weeks = Object.keys(grouped).sort().reverse();
-                const shown = weeks.slice(0, 2);
-                const hiddenCount = data.income.length - shown.reduce((s, wk) => s + grouped[wk].length, 0);
+                // V16 — 10 semaines CALENDAIRES consecutives, pas les 10
+                // dernieres semaines contenant des donnees : une semaine a
+                // zero est une information, la sauter casserait le visuel.
+                // Deux en detail deplie, huit en total simple.
+                const DETAIL = 2, TOTAL = 8;
+                const span = Array.from({ length: DETAIL + TOTAL }, (_, k) => weekKey(k));
+                const shown = span.slice(0, DETAIL);
+                const totalsOnly = span.slice(DETAIL);
+                const sumOf = (wk) => (grouped[wk] || []).reduce((s, i) => s + (i.kind === "reimbursement" ? 0 : Number(i.amount) || 0), 0);
+                const spanCount = span.reduce((s, wk) => s + (grouped[wk] || []).length, 0);
+                const hiddenCount = data.income.length - spanCount;
                 const tagOf = (i) => i.kind === "reimbursement" ? ["Reimbursement", C.gold] : i.taxSource === "abn" ? ["Rideshare", C.blue] : i.taxSource === "tfn" ? ["Salary", C.green] : ["Other", C.violet];
                 const iconOf = (i) => i.kind === "reimbursement" ? "person" : i.taxSource === "abn" ? "car" : i.taxSource === "tfn" ? "briefcase" : "dollar";
                 return (React.createElement(React.Fragment, null,
                     shown.map((wk) => {
-                        const sum = grouped[wk].reduce((s, i) => s + (i.kind === "reimbursement" ? 0 : Number(i.amount)), 0);
+                        const sum = (grouped[wk] || []).reduce((s, i) => s + (i.kind === "reimbursement" ? 0 : Number(i.amount) || 0), 0);
                         const open = wkOpen !== wk;
                         return (React.createElement("div", { key: wk, className: "fg-card", style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 14, overflow: "hidden", marginBottom: 12 } },
                             React.createElement("div", { onClick: () => setWkOpen(open ? wk : null), style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "13px 15px", background: C.bgCardHi, cursor: "pointer" } },
@@ -2410,7 +2516,7 @@ function Income({ data, update, openHistory, showToast, setTab }) {
                                     React.createElement("span", { style: { fontSize: 15, fontWeight: 700, color: C.green } }, fmt(sum)),
                                     React.createElement("span", { style: { display: "flex", transform: open ? "rotate(-90deg)" : "rotate(90deg)", transition: "transform .2s" } },
                                         React.createElement(Icon, { name: "chevron", size: 15, color: C.textFaint })))),
-                            open && grouped[wk].map((i, n) => {
+                            open && (grouped[wk] || []).map((i, n) => {
                                 const [tag, tcol] = tagOf(i), editing = editId === i.id;
                                 const amtCol = i.kind === "reimbursement" ? C.blue : i.taxSource === "abn" ? C.orange : C.green;
                                 return (React.createElement("div", { key: i.id, style: { borderTop: `1px solid ${C.line}`, padding: "13px 15px" } },
@@ -2433,10 +2539,17 @@ function Income({ data, update, openHistory, showToast, setTab }) {
                                         React.createElement(EditRow, { item: i, editing: true, onEdit: () => { }, onClose: () => setEditId(null), title: "", sub: "", val: "", tone: "green", fields: [["source", "text"], ["amount", "num"], ["date", "date"], ["note", "text"]], onSave: (patch) => { save(i.id, patch); setEditId(null); }, onDel: () => del(i.id) })))));
                             })));
                     }),
-                    hiddenCount > 0 && React.createElement("div", { style: { fontSize: 11, color: C.textFaint, textAlign: "center", padding: "4px 0 2px" } },
-                        "Showing last 2 weeks \u00B7 ",
-                        hiddenCount,
-                        " more kept for stats & statements")));
+                    React.createElement("div", { style: { margin: "6px 2px 8px", fontSize: 12, fontWeight: 600, letterSpacing: 0.5, color: C.textFaint, textTransform: "uppercase" } }, "Earlier weeks"),
+                    React.createElement("div", { className: "fg-card", style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 18, marginBottom: 12, overflow: "hidden" } }, totalsOnly.map((wk, k) => {
+                        const s = sumOf(wk), n = (grouped[wk] || []).length;
+                        return (React.createElement("div", { key: wk, style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 15px", borderTop: k === 0 ? "none" : `1px solid ${C.line}` } },
+                            React.createElement("div", null,
+                                React.createElement("div", { style: { fontSize: 14, color: n ? C.text : C.textFaint } }, "wk " + shortDate(wk)),
+                                React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginTop: 2 } }, n ? n + (n > 1 ? " entries" : " entry") : "no income")),
+                            React.createElement("span", { style: { fontSize: 15, fontWeight: 700, color: s > 0 ? C.green : C.textFaint, whiteSpace: "nowrap" } }, fmt(s))));
+                    })),
+                    React.createElement("div", { style: { fontSize: 11, color: C.textFaint, textAlign: "center", padding: "6px 0 2px" } },
+                        "Last 10 weeks \u00B7 " + fmt(span.reduce((s, wk) => s + sumOf(wk), 0)) + " total" + (hiddenCount > 0 ? " \u00B7 " + hiddenCount + " older kept for stats" : ""))));
             })(),
             data.income.length === 0 && React.createElement(Card, null,
                 React.createElement(Empty, null, "No income yet. Log it as it comes in.")),
@@ -2932,7 +3045,7 @@ function Tax({ data, update, openWork, openHistory, setTab }) {
     const shiftFuel = (u) => fuelOf(u, data);
     const rateNow = currentSetAsideRate(data);
     const shiftTax = (u) => Number(u.gross || 0) * (u.taxRate != null ? u.taxRate : rateNow); // frozen tax
-    const shiftNet = (u) => Number(u.gross || 0) - shiftTax(u) - Number(u.gross || 0) * superRate - shiftFuel(u); // real take-home
+    const shiftNet = (u) => Number(u.gross || 0) - shiftTax(u) - shiftFuel(u); // real take-home
     const fy = curFY();
     const fyEntries = abn.filter((u) => fyKeyOf(u.date) === fy);
     const fyGross = fyEntries.reduce((s, u) => s + Number(u.gross || 0), 0);
@@ -2943,7 +3056,7 @@ function Tax({ data, update, openWork, openHistory, setTab }) {
     const grossPerHour = fyHours > 0 ? fyGross / fyHours : 0;
     const netPerHour = fyHours > 0 ? fyNet / fyHours : 0;
     const shiftCount = fyEntries.length;
-    const superPot = fyGross * superRate; // self-provision envelope
+    const superPot = fySummary(data).superPot; // base unique
     const fyTaxAside = fyEntries.reduce((s, u) => s + shiftTax(u), 0);
     const add = () => {
         if (!gross)
@@ -2992,7 +3105,7 @@ function Tax({ data, update, openWork, openHistory, setTab }) {
                 const ubs2 = (data.uber || []).filter((u) => (u.type || "uber") === "uber" && weekKeyOf(u.date || "") === wkey);
                 const eH = emps2.reduce((s, e) => s + Number(e.hours || 0), 0), eN = emps2.reduce((s, e) => s + Number(e.net || 0), 0), eG = emps2.reduce((s, e) => s + Number(e.gross || 0), 0);
                 const uH = ubs2.reduce((s, u) => s + Number(u.hours || 0), 0), uG = ubs2.reduce((s, u) => s + Number(u.gross || 0), 0);
-                const uN = ubs2.reduce((s, u) => { const g = Number(u.gross || 0); return s + (g - g * (u.taxRate != null ? u.taxRate : rateNow) - g * superRate - shiftFuel(u)); }, 0);
+                const uN = ubs2.reduce((s, u) => { const g = Number(u.gross || 0); return s + (g - g * (u.taxRate != null ? u.taxRate : rateNow) - shiftFuel(u)); }, 0);
                 return { hours: eH + uH, net: eN + uN, wkStart: wkey, wkEnd: weekAddDays(wkey, 6), icon: eG >= uG ? "briefcase" : "car", tone: eG >= uG ? C.blue : C.orange };
             };
             const remaining = Math.max(0, goalH - hours);
@@ -3103,7 +3216,7 @@ function Tax({ data, update, openWork, openHistory, setTab }) {
             const nRec = [r.emp.weekPay, r.emp.monthPay, r.emp.weekH, r.emp.rate, r.uber.week, r.uber.month, r.uber.day, r.uber.rate].filter((x) => x > 0).length;
             const ubW = (data.uber || []).filter((u) => (u.type || "uber") === "uber" && weekKeyOf(u.date || "") === wk);
             const sr = data.tax?.superRate ?? 0.12, rn = currentSetAsideRate(data);
-            const ubProfit = ubW.reduce((s2, u) => { const g = Number(u.gross || 0); return s2 + (g - g * (u.taxRate != null ? u.taxRate : rn) - g * sr - fuelOf(u, data)); }, 0);
+            const ubProfit = ubW.reduce((s2, u) => { const g = Number(u.gross || 0); return s2 + (g - g * (u.taxRate != null ? u.taxRate : rn) - fuelOf(u, data)); }, 0);
             const mods = [
                 { id: "employment", icon: "briefcase", col: C.green, title: "Employment (TFN)", desc: "View your income history, estimated pay and tax info.", foot: `${f.fy} · Est. refund ${fmt(f.refund)}`, pct: 0.8 },
                 { id: "uber", icon: "car", col: C.orange, title: "Uber (ABN)", desc: "Monitor your Uber earnings, expenses and profit.", foot: `This week: ${fmt(ubProfit)} profit \u00B7 ${(+uberHoursTally(data).week.hours.toFixed(1))} h`, pct: ubProfit > 0 ? 0.7 : 0.04 },
@@ -3159,7 +3272,7 @@ function Tax({ data, update, openWork, openHistory, setTab }) {
                     " \u00B7 after tax, super & fuel"),
                 React.createElement("div", { style: { height: 1, background: C.line, margin: "14px 0" } }),
                 React.createElement(Row, { k: "Gross earned", v: fmt(fyGross) }),
-                React.createElement(Row, { k: "Fuel", v: fmt(-Math.max(0, fyGross - fyNet - fyTaxAside - superPot)), tone: "red" }),
+                React.createElement(Row, { k: "Fuel", v: fmt(-Math.max(0, fyGross - fyNet - fyTaxAside)), tone: "red" }),
                 React.createElement(Row, { k: `Tax to set aside · ${Math.round(rateNow * 100)}% now`, v: fmt(-fyTaxAside), tone: "gold" }),
                 React.createElement(Row, { k: `Super to set aside (${Math.round(superRate * 100)}%)`, v: fmt(-superPot), tone: "blue" }),
                 React.createElement("div", { style: { height: 1, background: C.line, margin: "12px 0" } }),
@@ -3311,7 +3424,7 @@ function Tax({ data, update, openWork, openHistory, setTab }) {
                     r.hasUber && (React.createElement(React.Fragment, null,
                         React.createElement("div", { style: { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: C.textFaint, margin: "14px 0 8px" } },
                             "\uD83D\uDE97 Uber records",
-                            (() => { const u = (data.uber || []).filter((x) => (x.type || "uber") === "uber"); const th = u.reduce((s, x) => s + Number(x.hours || 0), 0); const sr = data.tax?.superRate ?? 0.12; const rn = currentSetAsideRate(data); const tp = u.reduce((s, x) => { const g = Number(x.gross || 0); return s + (g - g * (x.taxRate != null ? x.taxRate : rn) - g * sr - fuelOf(x, data)); }, 0); return th > 0 ? React.createElement("span", { style: { color: C.gold, textTransform: "none", letterSpacing: 0, fontWeight: 700 } },
+                            (() => { const u = (data.uber || []).filter((x) => (x.type || "uber") === "uber"); const th = u.reduce((s, x) => s + Number(x.hours || 0), 0); const sr = data.tax?.superRate ?? 0.12; const rn = currentSetAsideRate(data); const tp = u.reduce((s, x) => { const g = Number(x.gross || 0); return s + (g - g * (x.taxRate != null ? x.taxRate : rn) - fuelOf(x, data)); }, 0); return th > 0 ? React.createElement("span", { style: { color: C.gold, textTransform: "none", letterSpacing: 0, fontWeight: 700 } },
                                 " \u00B7 ",
                                 fmt(tp / th),
                                 "/h avg profit") : null; })()),
@@ -3921,7 +4034,7 @@ function Statement({ data, onClose }) {
     const superRate = data.tax?.superRate ?? 0.12;
     const shiftFuel = (u) => fuelOf(u, data);
     const rateFallback = currentSetAsideRate(data);
-    const shiftNet = (u) => { const g = Number(u.gross || 0); return g - g * (u.taxRate != null ? u.taxRate : rateFallback) - g * superRate - shiftFuel(u); };
+    const shiftNet = (u) => { const g = Number(u.gross || 0); return g - g * (u.taxRate != null ? u.taxRate : rateFallback) - shiftFuel(u); };
     const tfn = (data.income || []).filter((i) => inFy(i.date) && i.kind !== "reimbursement" && i.taxSource !== "abn");
     const shifts = (data.uber || []).filter((u) => inFy(u.date));
     const byMonth = (items, gf, nf) => { const m = {}; items.forEach((it) => { const k = (it.date || "").slice(0, 7); if (!m[k])
@@ -4636,16 +4749,18 @@ const CAT_ICON = {
     "Travel": ["plane", "violet"], "Subscriptions": ["card", "teal"], "Insurance": ["shield", "teal"],
     "Debt": ["card", "red"], "Investing & Saving": ["invest", "lime"], "Saving": ["invest", "lime"],
     "Investing": ["invest", "orange"], "Personal": ["person", "violet"], "Food": ["dining", "red"],
-    "Other": ["dots", "grey"],
+    "Other": ["dots", "grey"], "Work": ["bag", "teal"],
 };
-const GOAL_ICONS = [
-    ["Car", "car", "green"], ["TV / Electronics", "tv", "blue"], ["Vacation", "palm", "violet"],
-    ["Adventure", "mountain", "teal"], ["Home", "house", "orange"], ["Emergency Fund", "dollar", "green"],
-    ["Education", "cap", "orange"], ["Health & Fitness", "dumbbell", "violet"], ["Debt Repayment", "card", "orange"],
-    ["Cash on Hand", "piggy", "green"], ["Investments", "invest", "blue"], ["Business", "briefcase", "violet"],
-    ["Renovation", "tools", "teal"], ["Motorbike", "motorbike", "orange"], ["Luxury / Watch", "watch", "green"],
-    ["Wedding", "ring", "blue"], ["Boat", "boat", "orange"], ["Family / Child", "stroller", "violet"],
-];
+// V16 — jeu UNIQUE. GOAL_ICONS listait 18 icones dont 12 n'existaient pas
+// cote depenses : Luca avait deux lots concurrents pour la meme chose. La
+// liste est desormais derivee des categories de depense, donc une categorie
+// = une icone = un ton, des deux cotes. Le NOM reste libre dans goals et
+// commitments : la categorie ne fixe que l'apparence, jamais le libelle.
+const CAT_LIST = ["Housing & Bills", "Subscriptions", "Groceries", "Going out", "Transport", "Health & Fitness", "Saving", "Investing", "Travel", "Work", "Fuel", "Other"];
+const GOAL_ICONS = CAT_LIST.map((c) => [c, (CAT_ICON[c] || CAT_ICON.Other)[0], (CAT_ICON[c] || CAT_ICON.Other)[1]]);
+// Icones de l'ancien lot goals qui n'ont pas d'equivalent cote depenses.
+// Remappees une fois dans migrate pour ne laisser aucun projet sans icone.
+const LEGACY_ICON_MAP = { briefcase: "bag", tools: "bag", tv: "card", palm: "plane", mountain: "plane", boat: "plane", motorbike: "car", dumbbell: "cross", watch: "bag", ring: "heart", stroller: "person", dollar: "invest", cap: "bag" };
 // Cache de personnalisation des catégories. Écrit uniquement hors rendu
 // (migrate au chargement, effet de persistance à chaque changement) — jamais pendant le render.
 let CAT_USER = {};
