@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v16.1";
+const APP_VERSION = "v17.3";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -115,14 +115,13 @@ const seed = () => ({
         { id: uid(), name: "ETF (VGS/VAS)", target: 20000, saved: 0, kind: "invest", contribs: [], celebrated: false },
     ],
     streak: { count: 0, lastWeek: null, best: 0 },
-    allocation: { Living: 75, Saving: 25, Investing: 0 },
     tax: { taxRate: 0.32, superRate: 0.12, fuelPrice: 0, cons: 0, bag: 0, otherDeductions: 0 },
     positions: [],
     rateRecords: { tfnGross: 0, tfnNet: 0, abnGross: 0, abnNet: 0 },
     timesheets: [],
     uber: [],
     accounts: { checking: 0, savings: 0, asOf: todayKey(), asOfTs: nowTs() },
-    commitments: { projects: [], weeklySurplus: 0, paydayDow: 4, bufferOverride: null, uberMax: 0, weeklyTarget: 0, allocLog: [] },
+    commitments: { projects: [], paydayDow: 4, bufferOverride: null, weeklyTarget: 0, allocLog: [] },
     backup: { last: null, reminderDays: 7 },
     categories: ["Housing & Bills", "Subscriptions", "Groceries", "Going out", "Transport", "Fuel", "Health & Fitness", "Saving", "Investing", "Travel", "Work", "Other"],
 });
@@ -255,11 +254,6 @@ function curFY() { return fyKeyOf(todayKey()); }
 const KM_RATE = 0.91; // ATO cents/km 2026-27 (LI 2026/19)
 const KM_CAP = 5000; // max business km/yr for cents method
 // big families for the Money split (target vs real). Each maps a set of categories.
-const FAMILIES = [
-    { key: "Living", color: "#5B8DEF", cats: ["Housing & Bills", "Subscriptions", "Groceries", "Going out", "Transport", "Health & Fitness", "Other"] },
-    { key: "Saving", color: "#EF8CC8", cats: ["Saving"] },
-    { key: "Investing", color: "#B5E853", cats: ["Investing"] },
-];
 // ─────────────────────────────────────────────────────────────
 //  ROOT
 function undoSameShape(a, b) {
@@ -474,6 +468,20 @@ function App() {
             update((d) => { d.streak = s; });
         }
     }, [data?.spend, data?.payments]); // eslint-disable-line
+    // V16 — un badge atteint est fige avec sa date et ne se reprend jamais,
+    // meme si le chiffre qui l'a declenche redescend ensuite. C'est une
+    // collection, pas un tableau de bord.
+    useEffect(() => {
+        if (!data)
+            return;
+        const bs = badgeState(data);
+        if (!bs.newly.length)
+            return;
+        update((d) => { d.badges = d.badges || {}; bs.newly.forEach((id) => { if (!d.badges[id]) d.badges[id] = { date: todayKey() }; }); });
+        const first = BADGE_DEFS.find((b) => b.id === bs.newly[0]);
+        if (first)
+            setRecordFlash({ title: "Badge \u00B7 " + first.name });
+    }, [data?.income, data?.uber, data?.spend, data?.timesheets, data?.goals, data?.commitments]); // eslint-disable-line
     useEffect(() => {
         if (!data)
             return;
@@ -560,7 +568,7 @@ function migrate(d) {
     (d.income || []).forEach((i) => { if (!i.kind)
         i.kind = "income"; });
     d.accounts || (d.accounts = { checking: 0, savings: 0, asOf: todayKey(), asOfTs: nowTs() });
-    d.commitments = { projects: [], weeklySurplus: 0, paydayDow: 4, bufferOverride: null, uberMax: 0, weeklyTarget: 0, allocLog: [], ...(d.commitments && typeof d.commitments === "object" ? d.commitments : {}) };
+    d.commitments = { projects: [], paydayDow: 4, bufferOverride: null, weeklyTarget: 0, allocLog: [], ...(d.commitments && typeof d.commitments === "object" ? d.commitments : {}) };
     (_a = d.commitments).allocLog || (_a.allocLog = []);
     (_b = d.commitments).projects || (_b.projects = []);
     // toute entrée sans id devient inéditable/insupprimable → on en attribue un
@@ -607,6 +615,57 @@ function migrate(d) {
     // s'active a la main une fois le visa regle.
     if (!d.taxDebt || typeof d.taxDebt !== "object")
         d.taxDebt = { active: false, dueDate: null };
+    // V16 — badges gagnes, gardes pour toujours. { id: { date, value } }.
+    if (!d.badges || typeof d.badges !== "object")
+        d.badges = {};
+    // V16 — purge unique des cles ecrites mais jamais lues, sur le modele de
+    // d.sessions. `allocation` etait un pipeline complet (defaut, migration,
+    // nettoyage) qui ne menait a aucun affichage ; `uberMax` et
+    // `weeklySurplus` sont les deux reglages dont on avait retire les champs
+    // a l'audit v15.2 sans retirer les cles ; `breakMin` n'existe nulle part
+    // dans le code. Rien de tout cela n'alimentait un chiffre affiche.
+    // V16.6 — Les entrees de allocLog n'avaient pas de projectId : rien ne
+    // permettait a Forge de voir qu'il enregistrait deux fois la meme
+    // allocation. Trois lignes de 545.48 existent pour UNE seule allocation
+    // reelle (confirme par Luca), meme incident que le doublon de commitment
+    // Visa. Nettoyage cible sur cette signature exacte, jamais une regle
+    // generale : deux allocations identiques a deux jours d'ecart peuvent
+    // etre parfaitement legitimes.
+    // V16.7 — entre le passage en v16.1 et ce correctif, timesheetEstimate
+    // appliquait le taux de provision ABN (32,5 %) aux timesheets d'emploi.
+    // Sa retenue reelle est de ~15 % et il la saisit lui-meme sur chaque
+    // income. Ces montants sont donc faux : on les recalcule au taux PAYG
+    // observe. Passe unique, uniquement sur les fiches TFN saisies a la main.
+    if (!d._tfnTaxFixV16) {
+        const inc = (d.income || []).filter((i) => i.kind === "income" && i.taxSource !== "abn");
+        const tg = inc.reduce((s, i) => s + num(i.gross), 0);
+        const tw = inc.reduce((s, i) => s + num(i.withheld), 0);
+        const payg = tg > 0 ? Math.min(0.47, tw / tg) : 0;
+        for (const t of d.timesheets || [])
+            if (t && t.v === 2 && String(t.taxType || "tfn") !== "abn" && !String(t.origin || "").startsWith("seed:"))
+                t.tax = Math.round(num(t.gross) * payg * 100) / 100;
+        d._tfnTaxFixV16 = true;
+    }
+    if (!d._allocDedupV16) {
+        const log = (d.commitments && d.commitments.allocLog) || [];
+        const isDup = (a) => Math.abs(num(a.amount) - 545.48) < 0.005 && (a.date === "2026-08-15" || a.date === "2026-08-16");
+        const hits = log.filter(isDup);
+        if (hits.length > 1) {
+            let kept = false;
+            d.commitments.allocLog = log.filter((a) => { if (!isDup(a)) return true; if (kept) return false; kept = true; return true; });
+        }
+        d._allocDedupV16 = true;
+    }
+    if (!d._deadKeysV16) {
+        delete d.allocation;
+        if (d.commitments && typeof d.commitments === "object") {
+            delete d.commitments.uberMax;
+            delete d.commitments.weeklySurplus;
+        }
+        if (d.lastUsed && typeof d.lastUsed === "object")
+            delete d.lastUsed.breakMin;
+        d._deadKeysV16 = true;
+    }
     // V16 — deux categories ajoutees une seule fois, comme Fuel avant elles.
     if (!d._catV16Seeded) {
         d.categories = Array.isArray(d.categories) ? d.categories : [];
@@ -636,12 +695,6 @@ function migrate(d) {
         d.tax.taxRate = 0;
         d.tax.rateFY = _fy;
     }
-    // allocation is now a family→pct map; reset old array form
-    if (!d.allocation || Array.isArray(d.allocation))
-        d.allocation = { ...base.allocation };
-    else
-        FAMILIES.forEach((f) => { if (d.allocation[f.key] == null)
-            d.allocation[f.key] = 0; });
     d.goals = (d.goals || base.goals).map((g) => ({ contribs: [], celebrated: false, ...g }));
     // v12.7 — le champ `account` a été écrit "Checking"/"Savings" par le
     // formulaire Log a spend, alors que le calcul de solde comparait en
@@ -660,8 +713,6 @@ function migrate(d) {
     if (!d.categories || d.categories.join("|") === OLD.join("|"))
         d.categories = base.categories;
     d.categories = (d.categories || []).filter((c) => c !== "Debt payback");
-    if (d.allocation)
-        delete d.allocation["Debt payback"];
     ["fixed", "spend", "payments"].forEach((k) => (d[k] || []).forEach((it) => { if (it.cat && REMAP[it.cat])
         it.cat = REMAP[it.cat]; }));
     // Fuel séparé du reste : toute dépense dont le libellé est (à l'espace/casse
@@ -858,7 +909,7 @@ function AccountToggle({ value, onChange }) {
 const empEntries = memoCalc("empEntries", function (data) {
     // Employment work for stats = timesheets (v2) + legacy ABN shifts. net = gross − est.tax − est.super.
     const out = [];
-    (data.timesheets || []).filter((t) => t.v === 2).forEach((t) => { const g = Number(t.gross || 0); out.push({ date: t.date, week: t.weekStart || weekKeyOf(t.date || ""), month: (t.weekStart || t.date || "").slice(0, 7), gross: g, hours: Number(t.hours || 0), net: g - Number(t.tax || 0) - Number(t.superAmt || 0) }); });
+    (data.timesheets || []).filter((t) => t.v === 2).forEach((t) => { const g = Number(t.gross || 0); out.push({ date: t.date, week: t.weekStart || weekKeyOf(t.date || ""), month: (t.weekStart || t.date || "").slice(0, 7), gross: g, hours: Number(t.hours || 0), net: g - Number(t.tax || 0) - (String(t.taxType || "tfn") === "abn" ? Number(t.superAmt || 0) : 0) }); });
     (data.uber || []).filter((u) => u.type === "abn").forEach((u) => { const g = Number(u.gross || 0); out.push({ date: u.date, week: weekKeyOf(u.date), month: (u.date || "").slice(0, 7), gross: g, hours: Number(u.hours || 0), net: g }); });
     return out;
 });
@@ -1021,8 +1072,24 @@ function workAverages(data) {
         map[k] = { g: 0, h: 0 }; map[k].g += g; map[k].h += h; };
     empEntries(data).forEach((e) => { add(wk, e.week, e.gross, e.hours); add(mo, e.month, e.gross, e.hours); });
     (data.uber || []).filter((u) => (u.type || "uber") === "uber").forEach((u) => { add(wk, weekKeyOf(u.date), Number(u.gross || 0), Number(u.hours || 0)); add(mo, (u.date || "").slice(0, 7), Number(u.gross || 0), Number(u.hours || 0)); });
+    // V16.8 — une moyenne ne compte que les periodes COMPLETES. Le premier
+    // mois d'activite et le mois en cours sont partiels : les moyenner comme
+    // des mois pleins ecrasait le resultat. Sur ses donnees, juin a 36h et
+    // septembre a 2,3h tiraient la moyenne de 164h a 102h, et le rapport
+    // mois/semaine tombait a 3,25 au lieu de 4,33. Idem pour la semaine
+    // en cours, qui n'est jamais finie quand on la regarde.
+    const curWk = weekKeyOf(todayKey()), curMo = todayKey().slice(0, 7);
+    // On n'exclut QUE la periode en cours. Exclure aussi le premier mois
+    // tombait a 2 mois d'echantillon et donnait un rapport mois/semaine de
+    // 5,87 : pire que le biais qu'on corrigeait. Le premier mois est court
+    // mais reel, et le garder aligne les deux moyennes (rapport ~4,3).
+    const drop = (map, skip) => { const o = {}; for (const k of Object.keys(map))
+        if (!skip.includes(k))
+            o[k] = map[k]; return Object.keys(o).length ? o : map; };
+    const wkF = drop(wk, [curWk]);
+    const moF = drop(mo, [curMo]);
     const avg = (map, f) => { const v = Object.values(map); return v.length ? v.reduce((s, x) => s + f(x), 0) / v.length : 0; };
-    return { wkGross: avg(wk, (v) => v.g), wkHours: avg(wk, (v) => v.h), moGross: avg(mo, (v) => v.g), moHours: avg(mo, (v) => v.h) };
+    return { wkGross: avg(wkF, (v) => v.g), wkHours: avg(wkF, (v) => v.h), moGross: avg(moF, (v) => v.g), moHours: avg(moF, (v) => v.h), wkCount: Object.keys(wkF).length, moCount: Object.keys(moF).length };
 }
 function topEmpRate(data) {
     let top = 0;
@@ -1047,7 +1114,16 @@ const activityRecords = memoCalc("activityRecords", function (data) {
     const avgV = (obj) => { const v = Object.values(obj); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : 0; };
     const empWeekPay = sumBy(emp, (x) => x.week, (x) => x.gross);
     const empMonthPay = sumBy(emp, (x) => x.month, (x) => x.gross);
-    const empWeekH = sumBy(emp, (x) => x.week, (x) => x.hours);
+    // V16.8 — le record d'heures ne comptait que l'emploi alors que la
+    // semaine en cours et la moyenne comptent emploi + Uber. Un record
+    // (28 h) inferieur a la moyenne (31,4 h) est impossible : c'etaient
+    // deux mesures differentes affichees cote a cote. Meme perimetre.
+    const allWeekH = {};
+    emp.forEach((x) => { if (x.week)
+        allWeekH[x.week] = (allWeekH[x.week] || 0) + Number(x.hours || 0); });
+    (data.uber || []).filter((u) => (u.type || "uber") === "uber").forEach((u) => { const k = weekKeyOf(u.date); if (k)
+        allWeekH[k] = (allWeekH[k] || 0) + Number(u.hours || 0); });
+    const empWeekH = allWeekH;
     const empMonthH = sumBy(emp, (x) => x.month, (x) => x.hours);
     const empRate = Math.max(0, ...emp.filter((x) => x.hours > 0).map((x) => x.gross / x.hours));
     const ubDay = sumBy(ub, (x) => x.date, (x) => x.profit);
@@ -1333,6 +1409,25 @@ function payWeekKeyOf(dateStr, paydayDow) {
 // Sans allocation encore cette semaine, le montant requis est un APERÇU
 // calculé à la volée (remaining ÷ semaines de paie restantes), qui ne se
 // fige qu'au moment de la première allocation réelle de la semaine.
+// V17 — les trois etapes d'un commitment, derivees de ce qui existe deja :
+// la derniere allocation reelle (allocLog), le besoin de la semaine en cours
+// (commitmentWeekStatus) et la semaine de l'echeance. Aucune donnee nouvelle,
+// et chaque allocation met les etapes a jour immediatement.
+function commitmentSteps(data, p) {
+    const log = (data.commitments && data.commitments.allocLog) || [];
+    const tagged = log.filter((a) => a.projectId);
+    // Les entrees anterieures a la v16.6 n'ont pas de projectId. Quand AUCUNE
+    // n'en a, on retombe sur la plus recente du journal ; des qu'il y en a,
+    // on ne prend que celles du projet, pour ne pas melanger deux engagements.
+    const mine = tagged.length ? log.filter((a) => a.projectId === p.id) : log;
+    const last = mine.slice().sort((a, b) => String(a.date || "") < String(b.date || "") ? 1 : -1)[0] || null;
+    const st = commitmentWeekStatus(data, p);
+    const remaining = Math.max(0, num(p.target) - num(p.allocated));
+    const weeksLeft = st.weeksLeft || 0;
+    const finalWeek = p.due ? weekKeyOf(p.due) : null;
+    const staleDays = last && last.date ? Math.round((new Date(todayKey()) - new Date(last.date + "T00:00:00")) / DAY_MS) : null;
+    return { last, st, remaining, weeksLeft, finalWeek, staleDays, done: remaining <= 0 };
+}
 function commitmentWeekStatus(data, p) {
     const paydayDow = data.commitments?.paydayDow ?? 4;
     const fromKey = todayKey();
@@ -1453,6 +1548,89 @@ const rolling7Net = memoCalc("rolling7Net", function (data) {
         }
     return net;
 });
+// V16 — serie hebdomadaire consolidee. Base commune aux badges et aux
+// alertes, pour qu'ils ne divergent jamais l'un de l'autre.
+const weeklySeries = memoCalc("weeklySeries", function (data) {
+    const W = {};
+    const put = (k, f, v) => { const w = weekKeyOf(k); if (!w) return; (W[w] || (W[w] = { week: w, tfn: 0, ubGross: 0, ubHours: 0, empHours: 0, spend: 0, ext: 0 }))[f] += v; };
+    for (const i of data.income || []) {
+        if (i.kind === "external") put(i.date, "ext", num(i.amount));
+        else if (i.kind === "income") put(i.date, i.taxSource === "abn" ? "ubGross" : "tfn", num(i.amount));
+    }
+    for (const u of data.uber || [])
+        if ((u.type || "uber") === "uber") { put(u.date, "ubGross", 0); put(u.date, "ubHours", num(u.hours)); }
+    for (const t of data.timesheets || []) put(t.date || t.weekStart, "empHours", num(t.hours));
+    for (const s of data.spend || []) put(s.date, "spend", num(s.amount));
+    return Object.values(W).sort((a, b) => (a.week < b.week ? -1 : 1)).map((x) => ({ ...x, income: x.tfn + x.ubGross }));
+});
+// Paliers plutot que "bats ton record" : un record ne se regagne pas, un
+// palier se collectionne. Seuils cales sur le backtest de son historique
+// pour qu'ils soient ni offerts ni inatteignables.
+const BADGE_DEFS = [
+    { id: "uber-wk-250", cat: "uber", icon: "car", tone: "blue", name: "Uber $250", desc: "$250 brut Uber sur une semaine" },
+    { id: "uber-wk-500", cat: "uber", icon: "car", tone: "blue", name: "Uber $500", desc: "$500 brut Uber sur une semaine" },
+    { id: "uber-wk-750", cat: "uber", icon: "car", tone: "blue", name: "Uber $750", desc: "$750 brut Uber sur une semaine" },
+    { id: "uber-wk-1000", cat: "uber", icon: "car", tone: "gold", name: "Uber $1000", desc: "$1000 brut Uber sur une semaine" },
+    { id: "inc-wk-1500", cat: "income", icon: "invest", tone: "green", name: "Semaine $1.5k", desc: "$1500 de revenus sur une semaine" },
+    { id: "inc-wk-2000", cat: "income", icon: "invest", tone: "green", name: "Semaine $2k", desc: "$2000 de revenus sur une semaine" },
+    { id: "inc-wk-2500", cat: "income", icon: "invest", tone: "gold", name: "Semaine $2.5k", desc: "$2500 de revenus sur une semaine" },
+    { id: "streak-4", cat: "streak", icon: "bolt", tone: "orange", name: "4 semaines", desc: "4 semaines d'affilee au-dessus du besoin" },
+    { id: "streak-8", cat: "streak", icon: "bolt", tone: "orange", name: "8 semaines", desc: "8 semaines d'affilee au-dessus du besoin" },
+    { id: "streak-12", cat: "streak", icon: "bolt", tone: "gold", name: "12 semaines", desc: "12 semaines d'affilee au-dessus du besoin" },
+    { id: "streak-26", cat: "streak", icon: "bolt", tone: "gold", name: "26 semaines", desc: "Six mois d'affilee au-dessus du besoin" },
+    { id: "hrs-100", cat: "volume", icon: "bag", tone: "teal", name: "100 heures", desc: "100 heures travaillees, tous jobs" },
+    { id: "hrs-500", cat: "volume", icon: "bag", tone: "teal", name: "500 heures", desc: "500 heures travaillees, tous jobs" },
+    { id: "hrs-1000", cat: "volume", icon: "bag", tone: "gold", name: "1000 heures", desc: "1000 heures travaillees, tous jobs" },
+    { id: "tracked-12", cat: "volume", icon: "cap", tone: "violet", name: "Un trimestre", desc: "12 semaines de suivi" },
+    { id: "tracked-26", cat: "volume", icon: "cap", tone: "violet", name: "Six mois", desc: "26 semaines de suivi" },
+    { id: "tracked-52", cat: "volume", icon: "cap", tone: "gold", name: "Un an", desc: "52 semaines de suivi" },
+    { id: "commit-done", cat: "milestone", icon: "shield", tone: "green", name: "Premier engagement tenu", desc: "Un commitment mene a son terme" },
+    { id: "goal-done", cat: "milestone", icon: "piggy", tone: "green", name: "Premier objectif atteint", desc: "Un goal atteint a 100%" },
+];
+const badgeState = memoCalc("badgeState", function (data) {
+    const S = weeklySeries(data), need = weeklyEarnNeed(data).total;
+    const maxUb = Math.max(0, ...S.map((w) => w.ubGross));
+    const maxInc = Math.max(0, ...S.map((w) => w.income));
+    const hrs = S.reduce((s, w) => s + w.ubHours + w.empHours, 0);
+    let run = 0, bestRun = 0;
+    for (const w of S) { run = w.income >= need ? run + 1 : 0; bestRun = Math.max(bestRun, run); }
+    const commitDone = ((data.commitments && data.commitments.projects) || []).some((p) => p.done);
+    const goalDone = (data.goals || []).some((g) => num(g.saved) >= num(g.target) && num(g.target) > 0);
+    const hit = {
+        "uber-wk-250": maxUb >= 250, "uber-wk-500": maxUb >= 500, "uber-wk-750": maxUb >= 750, "uber-wk-1000": maxUb >= 1000,
+        "inc-wk-1500": maxInc >= 1500, "inc-wk-2000": maxInc >= 2000, "inc-wk-2500": maxInc >= 2500,
+        "streak-4": bestRun >= 4, "streak-8": bestRun >= 8, "streak-12": bestRun >= 12, "streak-26": bestRun >= 26,
+        "hrs-100": hrs >= 100, "hrs-500": hrs >= 500, "hrs-1000": hrs >= 1000,
+        "tracked-12": S.length >= 12, "tracked-26": S.length >= 26, "tracked-52": S.length >= 52,
+        "commit-done": commitDone, "goal-done": goalDone,
+    };
+    const saved = data.badges || {};
+    const list = BADGE_DEFS.map((b) => ({ ...b, earned: !!(saved[b.id] || hit[b.id]), on: saved[b.id] ? saved[b.id].date : null }));
+    const newly = BADGE_DEFS.filter((b) => hit[b.id] && !saved[b.id]).map((b) => b.id);
+    return { list, newly, earnedCount: list.filter((b) => b.earned).length, total: BADGE_DEFS.length, bestRun, maxUb, maxInc, hours: hrs, weeks: S.length };
+});
+// Alertes : deliberement SEPAREES des badges. Une medaille et un
+// avertissement dans la meme liste, ca brouille les deux.
+const alertState = memoCalc("alertState", function (data) {
+    const S = weeklySeries(data), out = [];
+    if (S.length >= 2) {
+        const last = S[S.length - 2]; // derniere semaine CLOSE
+        const hist = S.slice(0, -2);
+        const avgSp = hist.length ? hist.reduce((s, w) => s + w.spend, 0) / hist.length : 0;
+        // `ext` compte ici : une depense couverte par un don n'est pas un derapage.
+        if (last.spend > last.income + last.ext)
+            out.push({ id: "spend-over", tone: "red", title: "Depenses superieures aux revenus", body: `Semaine du ${shortDate(last.week)} : ${fmt(last.spend)} depenses pour ${fmt(last.income + last.ext)} entres.` });
+        if (hist.length >= 3 && avgSp > 0 && last.spend > avgSp * 1.4)
+            out.push({ id: "spend-spike", tone: "gold", title: "Depenses au-dessus de ta moyenne", body: `${fmt(last.spend)} contre ${fmt(avgSp)} en moyenne.` });
+    }
+    const td = taxDebtStatus(data);
+    if (td.stock > 0)
+        out.push({ id: "tax-debt", tone: "gold", title: "Dette fiscale en cours", body: `${fmt(td.stock)} dus, en hausse de ${fmt(td.flow)} par semaine au rythme actuel.` });
+    const w = weeklyEarnNeed(data);
+    if (w.surplus < 0)
+        out.push({ id: "surplus-neg", tone: "red", title: "Besoin hebdomadaire non couvert", body: `Il manque ${fmt(Math.abs(w.surplus))} sur les 7 derniers jours pour tenir ${fmt(w.total)}.` });
+    return out;
+});
 const weeklyEarnNeed = memoCalc("weeklyEarnNeed", function (data) {
     const fixedWeekly = (data.fixed || []).reduce((s, f) => s + toWeeklyAmt(Number(f.amount) || 0, f.cadence), 0);
     const activeCommits = (data.commitments?.projects || []).filter((p) => !p.done);
@@ -1536,7 +1714,7 @@ function Commitments({ data, update }) {
         }
         p.payWeeks[curKey].allocated = Number(p.payWeeks[curKey].allocated || 0) + v;
         p.allocated = Math.max(0, Number(p.allocated || 0) + v);
-        ((_a = d.commitments).allocLog || (_a.allocLog = [])).push({ ts: nowTs(), date: todayKey(), amount: v });
+        ((_a = d.commitments).allocLog || (_a.allocLog = [])).push({ ts: nowTs(), date: todayKey(), amount: v, projectId: id });
     }); setAllocAmt(""); };
     const spendFrom = (id) => {
         update((d) => {
@@ -1620,31 +1798,43 @@ function Commitments({ data, update }) {
             s.projects.map((p, idx) => {
                 const need = Math.max(0, Number(p.target || 0) - Number(p.allocated || 0));
                 const wst = commitmentWeekStatus(data, p);
-                const wMeta = { on_track: { l: "On Track", c: C.green }, complete: { l: "Complete", c: C.green }, ahead: { l: "Ahead", c: C.blue }, behind: { l: "Behind", c: C.red } }[wst.status];
+                const wMeta = { on_track: { l: "On Track", c: C.green }, complete: { l: "Covered", c: C.green }, ahead: { l: "Ahead", c: C.blue }, behind: { l: "Behind", c: C.red } }[wst.status];
                 const pct = p.target > 0 ? Math.min(100, (Number(p.allocated || 0) / p.target) * 100) : 0;
                 const open = openId === p.id;
-                return (React.createElement("div", { key: p.id, style: { padding: "15px 0", borderTop: idx === 0 ? "none" : `1px solid ${C.line}` } },
+                const stp = commitmentSteps(data, p);
+                const col = C[p.tone] || C.violet;
+                // V17 — carte en etapes. Le badge de statut porte desormais le
+                // besoin de la SEMAINE, pas l'avancement global : afficher
+                // "Complete" sur un commitment a 25% etait la contradiction
+                // la plus visible de l'ecran.
+                const stepBox = (state, label, value, sub) => React.createElement("div", { key: label, style: { flex: 1, minWidth: 0, borderRadius: 13, padding: "10px 8px", border: `1px solid ${state === "next" ? C.blue : state === "done" ? C.green + "66" : "rgba(255,255,255,.09)"}`, background: state === "next" ? `${C.blue}1a` : state === "done" ? `${C.green}12` : "rgba(255,255,255,.02)" } },
+                    React.createElement(Icon, { name: state === "done" ? "check" : state === "next" ? "pulse" : "dots", size: 13, color: state === "next" ? C.blue : state === "done" ? C.green : C.textFaint }),
+                    React.createElement("div", { style: { fontSize: 10, color: state === "next" ? C.blue : C.textFaint, margin: "6px 0 3px", lineHeight: 1.25 } }, label),
+                    React.createElement("div", { style: { fontSize: 15, fontWeight: 800, letterSpacing: -0.3, color: C.text } }, value),
+                    React.createElement("div", { style: { fontSize: 10.5, color: state === "next" ? C.blue : C.textFaint, marginTop: 2 } }, sub));
+                return (React.createElement("div", { key: p.id, style: { position: "relative", background: `linear-gradient(135deg, ${col}1f 0%, ${col}0a 50%, rgba(255,255,255,.02) 100%)`, border: `1px solid ${col}3d`, borderRadius: 18, padding: 14, marginBottom: 12, overflow: "hidden", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", boxShadow: `0 8px 26px -14px ${col}55` } },
                     React.createElement("div", { onClick: () => { setOpenId(open ? null : p.id); setAllocAmt(""); setEditId(null); }, style: { cursor: "pointer" } },
-                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 9 } },
-                            React.createElement("span", { style: { fontSize: 14.5, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-                                React.createElement("span", { style: { display: "inline-block", width: 7, height: 7, borderRadius: 99, background: wMeta.c, marginRight: 9, verticalAlign: "middle", flexShrink: 0 } }),
-                                p.iconName ? React.createElement("span", { style: { display: "inline-flex", verticalAlign: "middle", marginRight: 7 } },
-                                    React.createElement(Icon, { name: p.iconName, size: 17, color: C[p.tone] || wMeta.c, stroke: 1.7 })) : React.createElement(React.Fragment, null,
-                                    p.icon,
-                                    " "),
-                                p.name),
-                            React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: C.text, whiteSpace: "nowrap" } }, wst.required > 0 ? `${fmt(wst.required)}/pay` : "Funded")),
-                        React.createElement("div", { style: { height: 5, background: C.bgCardHi, borderRadius: 99, overflow: "hidden" } },
-                            React.createElement("div", { style: { width: `${Math.max(2, pct)}%`, height: "100%", background: wMeta.c, borderRadius: 99, transition: "width .5s cubic-bezier(.4,0,.2,1)" } })),
-                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 10.5, color: C.textFaint, marginTop: 8 } },
-                            React.createElement("span", null,
-                                fmt(p.allocated || 0),
-                                " / ",
-                                fmt(p.target),
-                                p.due ? ` · ${shortDate(p.due)}` : ""),
-                            wst.required > 0 && React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5, color: wMeta.c, fontWeight: 800, letterSpacing: 0.3, textTransform: "uppercase", fontSize: 10 } },
-                                wst.locked && React.createElement(Icon, { name: "lock", size: 10, color: wMeta.c }),
-                                wMeta.l))),
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, marginBottom: 13 } },
+                            React.createElement("div", { style: { width: 46, height: 46, borderRadius: 13, background: `radial-gradient(circle at 32% 28%, ${col}4d, ${col}14 70%)`, border: `1px solid ${col}66`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } },
+                                React.createElement(Icon, { name: p.iconName || "shield", size: 20, color: col })),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 17, fontWeight: 700, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, p.name),
+                                React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, fmt(p.target) + " total" + (stp.weeksLeft ? " \u00B7 " + stp.weeksLeft + (stp.weeksLeft > 1 ? " weeks left" : " week left") : ""))),
+                            React.createElement("span", { style: { fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: wMeta.c, border: `1px solid ${wMeta.c}`, borderRadius: 99, padding: "5px 11px", whiteSpace: "nowrap", flexShrink: 0 } }, stp.done ? "Funded" : wMeta.l)),
+                        React.createElement("div", { style: { display: "flex", gap: 8 } },
+                            stepBox("done", "Last", stp.last ? fmt(stp.last.amount) : "\u2014", stp.last ? shortDate(stp.last.date) : "never"),
+                            stepBox("next", "This week", fmt(wst.required), wst.allocatedThisWeek > 0 ? fmt(wst.allocatedThisWeek) + " in" : "nothing yet"),
+                            stepBox("todo", "Final", stp.finalWeek ? fmt(wst.required) : "\u2014", stp.finalWeek ? shortDate(stp.finalWeek) : "no deadline")),
+                        React.createElement("div", { style: { marginTop: 11, background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.07)", borderRadius: 13, padding: 12 } },
+                            React.createElement("div", { style: { height: 6, background: "rgba(255,255,255,.09)", borderRadius: 99, overflow: "hidden" } },
+                                React.createElement("div", { style: { width: `${Math.max(2, pct)}%`, height: "100%", background: `linear-gradient(90deg, ${C.blue}, ${col})`, borderRadius: 99, boxShadow: `0 0 9px ${col}`, transition: "width .5s cubic-bezier(.4,0,.2,1)" } })),
+                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 9 } },
+                                React.createElement("span", { style: { fontSize: 13, fontWeight: 700, color: col, whiteSpace: "nowrap" } }, Math.round(pct) + "% complete"),
+                                React.createElement("span", { style: { fontSize: 12.5, color: C.textDim, whiteSpace: "nowrap" } }, fmt(stp.remaining) + " left"))),
+                        React.createElement("div", { style: { display: "flex", marginTop: 11, background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.07)", borderRadius: 13, padding: "11px 4px" } }, [["Start date", p.createdAt ? shortDate(p.createdAt) : "\u2014"], ["Set aside", fmt(p.allocated || 0)], ["Deadline", p.due ? shortDate(p.due) : "\u2014"]].map(([l, v]) => React.createElement("div", { key: l, style: { flex: 1, textAlign: "center", minWidth: 0 } },
+                            React.createElement("div", { style: { fontSize: 10, color: C.textFaint } }, l),
+                            React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: C.text, marginTop: 3 } }, v)))),
+                        stp.staleDays != null && stp.staleDays > 10 && !stp.done && React.createElement("div", { style: { marginTop: 9, fontSize: 11, color: C.gold, lineHeight: 1.4 } }, `Nothing set aside for ${stp.staleDays} days, while this asks ${fmt(wst.required)} a week.`)),
                     open && (React.createElement("div", { style: { marginTop: 12, background: C.bgCardHi, borderRadius: 12, padding: 13 } },
                         React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } },
                             React.createElement("span", { style: { color: (priMeta[p.priority] || priMeta.need).c, fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5 } }, (priMeta[p.priority] || priMeta.need).l),
@@ -2345,6 +2535,9 @@ function Income({ data, update, openHistory, showToast, setTab }) {
     const [view, setView] = useState("month");
     const [incClose, setIncClose] = useState(0);
     const [dupArm, setDupArm] = useState(false);
+    // V16.6 — l'argent externe est souvent un pret qu'il compte rendre, meme
+    // quand le preteur ne le reclame pas. Forge demande, il ne decide pas.
+    const [extAsk, setExtAsk] = useState(null);
     const isReimb = mode === "reimb";
     const isTfn = mode === "tfn";
     const add = () => {
@@ -2366,6 +2559,15 @@ function Income({ data, update, openHistory, showToast, setTab }) {
                 d.income.unshift({ ...base, amount: Number(amount) || 0, taxSource: "abn", kind: "income" });
             else if (mode === "reimb")
                 d.income.unshift({ ...base, amount: Number(amount) || 0, taxSource: null, kind: "reimbursement" });
+            // V16 — `external` : argent qui ARRIVE sur le compte sans etre un
+            // gain. Don familial, pret, vente perso. Il compte pour le solde,
+            // jamais pour les revenus ni pour la base imposable : le loger en
+            // income ferait payer 32,5% d'impot sur un don familial. fySummary
+            // et rolling7Net ne retiennent que kind === "income", il en est
+            // donc exclu d'office ; seul computeAccounts le voit, ce qui est
+            // exactement le comportement voulu.
+            else if (mode === "external")
+                d.income.unshift({ ...base, amount: Number(amount) || 0, taxSource: null, kind: "external" });
             else
                 d.income.unshift({ ...base, amount: Number(amount) || 0, taxSource: null, kind: "income" });
         });
@@ -2376,6 +2578,8 @@ function Income({ data, update, openHistory, showToast, setTab }) {
         setNote("");
         setDupArm(false);
         setProfileSel("");
+        if (mode === "external")
+            setExtAsk({ source, amount: Number(amount) || 0 });
         const label = isTfn ? "TFN" : mode === "abn" ? "ABN" : isReimb ? "Reimbursement" : "Other";
         showToast && showToast({ title: "Income recorded", lines: [`${label} · ${isTfn ? "Net received" : "Received"} ${fmt(netAmt)}`, source ? `From ${source}` : null].filter(Boolean) });
         return true;
@@ -2387,29 +2591,49 @@ function Income({ data, update, openHistory, showToast, setTab }) {
     const t = useTotals(data);
     const netPreview = (Number(gross) || 0) - (Number(withheld) || 0);
     const curM = todayKey().slice(0, 7), curW = weekKey(0);
-    const inPer = (rec, isWeek) => {
+    // V16.9 — l'onglet "Tax year" existait mais n'etait cable nulle part :
+    // il retombait sur le mois. Le filtre connait maintenant les trois vues.
+    const inPer = (rec, mode) => {
         const d = rec.date || rec.week || "";
-        return isWeek ? weekKeyOf(d) === curW : monthKeyOf(d) === curM;
+        if (mode === "week")
+            return weekKeyOf(d) === curW;
+        if (mode === "tax")
+            return d >= fyStartKey();
+        return monthKeyOf(d) === curM;
     };
     return (React.createElement("div", { style: { padding: "8px 16px 0" } },
         React.createElement(ScreenHead, { title: "Income", setTab: setTab, openHistory: openHistory }),
+        extAsk && (React.createElement("div", { onClick: () => setExtAsk(null), style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.62)", zIndex: 220, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { background: C.bgCard, width: "100%", maxWidth: 560, borderRadius: "18px 18px 0 0", padding: "20px 16px 24px", border: `1px solid ${C.line}` } },
+                React.createElement("div", { style: { fontSize: 17, fontWeight: 700, color: C.text } }, "Do you intend to pay this back?"),
+                React.createElement("div", { style: { fontSize: 13, color: C.textDim, marginTop: 8, lineHeight: 1.5 } },
+                    fmt(extAsk.amount) + (extAsk.source ? " from " + extAsk.source : "") + " is already recorded and stays out of your income and your tax. Tracking it as a debt adds a goal you can pay down \u2014 it sets no weekly target."),
+                React.createElement("button", { onClick: () => { const a = extAsk; setExtAsk(null); update((d) => { (d.goals || (d.goals = [])).push({ id: uid(), name: a.source || "Money to repay", target: a.amount, saved: 0, kind: "debt", icon: "card", tone: "pink", contribs: [], celebrated: false }); }); }, style: { width: "100%", padding: "15px 0", borderRadius: 12, border: "none", background: C.green, color: "#062611", fontWeight: 700, fontSize: 15.5, fontFamily: "inherit", cursor: "pointer", marginTop: 18 } }, "Yes, track it as a debt"),
+                React.createElement("button", { onClick: () => setExtAsk(null), style: { width: "100%", padding: "15px 0", borderRadius: 12, border: `1px solid ${C.line}`, background: C.bgCardHi, color: C.text, fontWeight: 500, fontSize: 15.5, fontFamily: "inherit", cursor: "pointer", marginTop: 10 } }, "No, it's a gift")))),
         React.createElement("div", { style: { display: "flex", justifyContent: "center", marginBottom: 16 } },
             React.createElement("div", { style: { display: "flex", gap: 4, background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 12, padding: 4 } }, [["week", "Week"], ["month", "Month"], ["tax", "Tax year"]].map(([v, l]) => (React.createElement("button", { key: v, onClick: () => setView(v), style: { padding: "9px 18px", borderRadius: 9, border: "none", background: view === v ? (v === "tax" ? C.gold : C.green) : "transparent", color: view === v ? "#0a1018" : C.textDim, fontWeight: 700, fontSize: 13.5, fontFamily: "inherit", cursor: "pointer", whiteSpace: "nowrap" } }, l))))),
         view === "tax" ? React.createElement(TaxYear, { data: data, openHistory: openHistory }) : (React.createElement(React.Fragment, null,
             (() => {
                 const ms = moneyStats(data);
                 const prov = currentSetAsideRate(data);
-                const isWeek = view === "week";
-                const total = isWeek ? ms.thisWeek : ms.thisMonth;
+                const isWeek = view === "week", isFY = view === "tax";
                 const now = new Date();
-                const start = isWeek ? new Date(curW + "T00:00:00") : new Date(now.getFullYear(), now.getMonth(), 1);
-                const days = Math.max(2, Math.round((now - start) / DAY_MS) + 1);
+                // V16.9 — en vue Tax year le graph couvre le 1er juillet a
+                // aujourd'hui. Un point par jour ferait ~365 points illisibles
+                // sur un ecran de telephone : on bucketise par semaine. Les
+                // deux autres vues restent au jour, elles sont assez courtes.
+                const step = isFY ? 7 : 1;
+                const start = isWeek ? new Date(curW + "T00:00:00")
+                    : isFY ? new Date(weekKeyOf(fyStartKey()) + "T00:00:00")
+                        : new Date(now.getFullYear(), now.getMonth(), 1);
+                const total = (data.income || []).filter((i) => i.kind === "income" && inPer(i, view)).reduce((s, i) => s + Number(i.amount || 0), 0);
+                const days = Math.max(2, Math.ceil((now - start) / (DAY_MS * step)) + 1);
                 const perDay = new Array(days).fill(0);
                 (data.income || []).filter((i) => i.kind === "income").forEach((i) => {
                     const ds = i.date || i.week || "";
                     if (!ds)
                         return;
-                    const idx = Math.round((new Date(ds + "T00:00:00") - start) / DAY_MS);
+                    const idx = Math.floor((new Date(ds + "T00:00:00") - start) / (DAY_MS * step));
                     if (idx >= 0 && idx < days) {
                         const r = Number(i.amount || 0);
                         perDay[idx] += i.taxSource === "abn" ? r * (1 - prov) : r;
@@ -2417,14 +2641,14 @@ function Income({ data, update, openHistory, showToast, setTab }) {
                 });
                 let run = 0;
                 const cum = perDay.map((v) => (run += v));
-                const every = isWeek ? 1 : 7;
+                const every = isWeek ? 1 : isFY ? Math.max(1, Math.ceil(days / 6)) : 7;
                 const labels = cum.map((_, i) => {
                     if (i % every !== 0 && i !== days - 1)
                         return "";
-                    const d = new Date(start.getTime() + i * DAY_MS);
+                    const d = new Date(start.getTime() + i * DAY_MS * step);
                     return `${d.getDate()} ${d.toLocaleDateString("en-AU", { month: "short" })}`;
                 });
-                const sum = (f) => (data.income || []).filter((i) => i.kind === "income" && inPer(i, isWeek) && f(i)).reduce((s, i) => s + Number(i.amount || 0), 0);
+                const sum = (f) => (data.income || []).filter((i) => i.kind === "income" && inPer(i, view) && f(i)).reduce((s, i) => s + Number(i.amount || 0), 0);
                 const tfn = sum((i) => i.taxSource === "tfn");
                 const abn = sum((i) => i.taxSource === "abn");
                 const other = sum((i) => i.taxSource !== "tfn" && i.taxSource !== "abn");
@@ -2434,7 +2658,7 @@ function Income({ data, update, openHistory, showToast, setTab }) {
                     React.createElement(Card, null,
                         React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: 0.7, color: C.textDim, textTransform: "uppercase" } }, "Total income"),
                         React.createElement("div", { style: { fontSize: 34, fontWeight: 800, color: C.green, marginTop: 7, letterSpacing: -1.2, lineHeight: 1 } }, React.createElement(Num, { value: total, format: fmt })),
-                        React.createElement("div", { style: { fontSize: 13, color: C.textDim, marginTop: 7 } }, isWeek ? "This week" : "This month"),
+                        React.createElement("div", { style: { fontSize: 13, color: C.textDim, marginTop: 7 } }, isWeek ? "This week" : isFY ? "Tax year to date \u00B7 since 1 July" : "This month"),
                         React.createElement("div", { style: { marginTop: 12 } },
                             React.createElement(AxisChart, { points: cum, labels: labels, color: C.green }))),
                     React.createElement(Card, null,
@@ -2459,13 +2683,13 @@ function Income({ data, update, openHistory, showToast, setTab }) {
             React.createElement(Collapse, { label: "Log income (money received)", tone: isReimb ? "blue" : isTfn ? "green" : mode === "abn" ? "gold" : "green", closeSignal: incClose },
                 React.createElement(FHead, { title: "Log income", sub: "Money received" }),
                 React.createElement(FLabel, null, "Source"),
-                React.createElement(FSeg, { tone: C.green, value: mode, onChange: setMode, options: [["tfn", "TFN pay"], ["abn", "ABN pay"], ["other", "Other"], ["reimb", "Reimb."]] }),
+                React.createElement(FSeg, { tone: C.green, value: mode, onChange: setMode, options: [["tfn", "TFN pay"], ["abn", "ABN pay"], ["other", "Other"], ["reimb", "Reimb."], ["external", "External"]] }),
                 React.createElement(FLabel, null, isReimb ? "From" : "Employer / payer"),
                 (data.positions || []).length > 0 && (React.createElement("select", { value: profileSel, onChange: (e) => { const id = e.target.value; setProfileSel(id); const p = (data.positions || []).find((x) => x.id === id); if (p)
                         setSource(p.name); }, style: { ...FS.field, appearance: "none", marginBottom: 8 } },
                     React.createElement("option", { value: "", style: { background: C.bgCard } }, "Type manually\u2026"),
                     (data.positions || []).map((p) => React.createElement("option", { key: p.id, value: p.id, style: { background: C.bgCard } }, p.name)))),
-                React.createElement(FInput, { value: source, onChange: (v) => { setSource(v); setProfileSel(""); }, placeholder: isReimb ? "Mate, refund…" : isTfn ? "Yatala…" : mode === "abn" ? "Uber, contract…" : "Dividend, sale, gift…" }),
+                React.createElement(FInput, { value: source, onChange: (v) => { setSource(v); setProfileSel(""); }, placeholder: mode === "external" ? "Family gift, loan, sale" : isReimb ? "Mate, refund…" : isTfn ? "Yatala…" : mode === "abn" ? "Uber, contract…" : "Dividend, sale, gift…" }),
                 isTfn ? (React.createElement(React.Fragment, null,
                     React.createElement("div", { style: { display: "flex", gap: 10 } },
                         React.createElement("div", { style: { flex: 1, minWidth: 0 } },
@@ -2483,7 +2707,7 @@ function Income({ data, update, openHistory, showToast, setTab }) {
                 React.createElement(FLabel, null, "Note (optional)"),
                 React.createElement(FInput, { value: note, onChange: setNote, placeholder: "Add note\u2026" }),
                 React.createElement(FAction, { tone: isReimb ? "blue" : isTfn ? "green" : mode === "abn" ? "gold" : "green", onClick: () => { if (add())
-                        setIncClose((c) => c + 1); } }, isReimb ? "Add reimbursement" : "Add income")),
+                        setIncClose((c) => c + 1); } }, mode === "external" ? "Add external money" : isReimb ? "Add reimbursement" : "Add income")),
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", margin: "20px 2px 10px" } },
                 React.createElement("span", { style: { fontSize: 13, fontWeight: 600, letterSpacing: 0.6, color: C.green, textTransform: "uppercase" } }, "History"),
                 React.createElement("button", { onClick: () => openHistory && openHistory({ flow: "income" }), style: { display: "flex", alignItems: "center", gap: 7, background: C.bgCardHi, border: `1px solid ${C.line}`, borderRadius: 10, padding: "8px 13px", color: C.text, fontSize: 13, fontWeight: 500, fontFamily: "inherit", cursor: "pointer" } },
@@ -2498,14 +2722,14 @@ function Income({ data, update, openHistory, showToast, setTab }) {
                 const span = Array.from({ length: DETAIL + TOTAL }, (_, k) => weekKey(k));
                 const shown = span.slice(0, DETAIL);
                 const totalsOnly = span.slice(DETAIL);
-                const sumOf = (wk) => (grouped[wk] || []).reduce((s, i) => s + (i.kind === "reimbursement" ? 0 : Number(i.amount) || 0), 0);
+                const sumOf = (wk) => (grouped[wk] || []).reduce((s, i) => s + (i.kind === "reimbursement" || i.kind === "external" ? 0 : Number(i.amount) || 0), 0);
                 const spanCount = span.reduce((s, wk) => s + (grouped[wk] || []).length, 0);
                 const hiddenCount = data.income.length - spanCount;
-                const tagOf = (i) => i.kind === "reimbursement" ? ["Reimbursement", C.gold] : i.taxSource === "abn" ? ["Rideshare", C.blue] : i.taxSource === "tfn" ? ["Salary", C.green] : ["Other", C.violet];
-                const iconOf = (i) => i.kind === "reimbursement" ? "person" : i.taxSource === "abn" ? "car" : i.taxSource === "tfn" ? "briefcase" : "dollar";
+                const tagOf = (i) => i.kind === "external" ? ["External \u00B7 not income", C.violet] : i.kind === "reimbursement" ? ["Reimbursement", C.gold] : i.taxSource === "abn" ? ["Rideshare", C.blue] : i.taxSource === "tfn" ? ["Salary", C.green] : ["Other", C.violet];
+                const iconOf = (i) => i.kind === "external" ? "person" : i.kind === "reimbursement" ? "person" : i.taxSource === "abn" ? "car" : i.taxSource === "tfn" ? "briefcase" : "dollar";
                 return (React.createElement(React.Fragment, null,
                     shown.map((wk) => {
-                        const sum = (grouped[wk] || []).reduce((s, i) => s + (i.kind === "reimbursement" ? 0 : Number(i.amount) || 0), 0);
+                        const sum = (grouped[wk] || []).reduce((s, i) => s + (i.kind === "reimbursement" || i.kind === "external" ? 0 : Number(i.amount) || 0), 0);
                         const open = wkOpen !== wk;
                         return (React.createElement("div", { key: wk, className: "fg-card", style: { background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 14, overflow: "hidden", marginBottom: 12 } },
                             React.createElement("div", { onClick: () => setWkOpen(open ? wk : null), style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "13px 15px", background: C.bgCardHi, cursor: "pointer" } },
@@ -2518,7 +2742,7 @@ function Income({ data, update, openHistory, showToast, setTab }) {
                                         React.createElement(Icon, { name: "chevron", size: 15, color: C.textFaint })))),
                             open && (grouped[wk] || []).map((i, n) => {
                                 const [tag, tcol] = tagOf(i), editing = editId === i.id;
-                                const amtCol = i.kind === "reimbursement" ? C.blue : i.taxSource === "abn" ? C.orange : C.green;
+                                const amtCol = i.kind === "external" ? C.violet : i.kind === "reimbursement" ? C.blue : i.taxSource === "abn" ? C.orange : C.green;
                                 return (React.createElement("div", { key: i.id, style: { borderTop: `1px solid ${C.line}`, padding: "13px 15px" } },
                                     React.createElement("div", { style: { display: "flex", alignItems: "flex-start", gap: 12 } },
                                         React.createElement("div", { style: { width: 38, height: 38, borderRadius: 11, border: `1px solid ${tcol}55`, background: `${tcol}12`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } },
@@ -2889,6 +3113,7 @@ function Plan({ data, update, onCelebrate }) {
     const [customBuf, setCustomBuf] = useState({});
     const [goalClose, setGoalClose] = useState(0);
     const [goalOpen, setGoalOpen] = useState(false);
+    const [panel, setPanel] = useState(null);
     const [gNote, setGNote] = useState("");
     const [gIcon, setGIcon] = useState("dollar");
     const [gTone, setGTone] = useState("green");
@@ -2944,31 +3169,29 @@ function Plan({ data, update, onCelebrate }) {
                         const p = g.target > 0 ? Math.min(100, (Number(g.saved || 0) / g.target) * 100) : 0;
                         const wd = weekDelta(g);
                         const isOpen = openGoal === g.id;
-                        return (React.createElement("div", { key: g.id, style: { background: C.bgCardHi, border: `1px solid ${isOpen ? m.col : C.line}`, borderRadius: 14, padding: 13, marginBottom: 10 } },
-                            React.createElement("div", { onClick: () => setOpenGoal(isOpen ? null : g.id), style: { display: "flex", alignItems: "center", gap: 12, cursor: "pointer" } },
-                                React.createElement("div", { style: { width: 46, height: 46, borderRadius: 11, background: `${m.col}1a`, border: `1px solid ${m.col}55`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } },
-                                    React.createElement(Icon, { name: m.icon, size: 20, color: m.col })),
+                        // V17 — carte en verre : degrade teinte par la couleur
+                        // du goal, bordure lumineuse, pastille d'icone ronde,
+                        // et bandeau bas qui porte le pourcentage et le reste
+                        // a financer. Le "+X this week" passe en second plan :
+                        // il valait 0 sur les quatre lignes et occupait la
+                        // position la plus forte de l'ecran.
+                        return (React.createElement("div", { key: g.id, style: { position: "relative", background: `linear-gradient(135deg, ${m.col}26 0%, ${m.col}0d 45%, rgba(255,255,255,.02) 100%)`, border: `1px solid ${isOpen ? m.col : m.col + "3d"}`, borderRadius: 18, marginBottom: 12, overflow: "hidden", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", boxShadow: `0 8px 26px -14px ${m.col}55` } },
+                            React.createElement("div", { onClick: () => setOpenGoal(isOpen ? null : g.id), style: { display: "flex", alignItems: "center", gap: 13, padding: "15px 15px 13px", cursor: "pointer" } },
+                                React.createElement("div", { style: { width: 52, height: 52, borderRadius: 99, background: `radial-gradient(circle at 32% 28%, ${m.col}4d, ${m.col}14 70%)`, border: `1px solid ${m.col}66`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: `inset 0 1px 0 ${m.col}55` } },
+                                    React.createElement(Icon, { name: m.icon, size: 22, color: m.col })),
                                 React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7 } },
-                                        React.createElement("span", { style: { fontSize: 15, fontWeight: 700, color: C.text, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, g.name),
+                                        React.createElement("span", { style: { fontSize: 16.5, fontWeight: 700, color: C.text, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, g.name),
                                         p >= 100 && React.createElement("span", { style: { fontSize: 9.5, fontWeight: 800, letterSpacing: 0.4, color: C.green, border: `1px solid ${C.green}`, borderRadius: 99, padding: "3px 8px", flexShrink: 0 } }, "DONE")),
-                                    React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 3 } },
-                                        fmt(g.saved),
-                                        " / ",
-                                        fmt(g.target)),
-                                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, marginTop: 8 } },
-                                        React.createElement("div", { style: { flex: 1, height: 5, background: C.line, borderRadius: 99, overflow: "hidden" } },
-                                            React.createElement("div", { style: { width: `${Math.max(2, p)}%`, height: "100%", background: m.col, borderRadius: 99, transition: "width .5s cubic-bezier(.4,0,.2,1)" } })),
-                                        React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: C.textDim, flexShrink: 0 } },
-                                            Math.round(p),
-                                            "%"))),
-                                React.createElement("div", { style: { textAlign: "right", flexShrink: 0 } },
-                                    React.createElement("div", { style: { fontSize: 15, fontWeight: 800, color: wd > 0 ? C.green : C.textFaint } },
-                                        "+",
-                                        fmt(wd)),
-                                    React.createElement("div", { style: { fontSize: 11, color: C.textFaint, marginTop: 3 } }, "this week")),
-                                React.createElement("span", { style: { color: C.textFaint, display: "flex", flexShrink: 0 } },
-                                    React.createElement(Icon, { name: "chevron", size: 15, color: C.textFaint }))),
+                                    React.createElement("div", { style: { fontSize: 13, color: C.textDim, marginTop: 2 } }, fmt(g.saved) + " / " + fmt(g.target)),
+                                    React.createElement("div", { style: { height: 5, background: "rgba(255,255,255,.09)", borderRadius: 99, overflow: "hidden", marginTop: 9 } },
+                                        React.createElement("div", { style: { width: `${Math.max(2, p)}%`, height: "100%", background: m.col, borderRadius: 99, boxShadow: `0 0 9px ${m.col}`, transition: "width .5s cubic-bezier(.4,0,.2,1)" } }))),
+                                React.createElement("div", { style: { textAlign: "right", flexShrink: 0, alignSelf: "flex-start" } },
+                                    React.createElement("div", { style: { fontSize: 15, fontWeight: 800, color: wd > 0 ? m.col : C.textFaint } }, "+" + fmt(wd)),
+                                    React.createElement("div", { style: { fontSize: 11, color: C.textFaint, marginTop: 2 } }, "this week"))),
+                            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 15px", borderTop: `1px solid ${m.col}2b`, background: `${m.col}0f` } },
+                                React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: m.col } }, Math.round(p) + "% completed"),
+                                React.createElement("span", { style: { fontSize: 12.5, color: C.textDim } }, fmt(Math.max(0, Number(g.target || 0) - Number(g.saved || 0))) + " left")),
                             isOpen && (React.createElement("div", { style: { marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.line}` } },
                                 React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } }, [25, 50, 100, 250].map((v) => (React.createElement("button", { key: v, onClick: () => adjust(g.id, v), style: { flex: 1, minWidth: 62, padding: "10px 0", borderRadius: 10, border: `1px solid ${C.line}`, background: C.bgCard, color: C.text, fontWeight: 700, fontSize: 13, fontFamily: "inherit", cursor: "pointer" } },
                                     "+",
@@ -3020,6 +3243,44 @@ function Plan({ data, update, onCelebrate }) {
                         React.createElement(FLabel, null, "Note (optional)"),
                         React.createElement(FInput, { value: gNote, onChange: setGNote, placeholder: "Add note\u2026" }),
                         React.createElement(FAction, { tone: "green", onClick: () => { add(); setGoalOpen(false); } }, "Add goal"))))));
+        })(),
+        (() => {
+            // V17.3 — alertes et badges etaient deux longues sections deroulees
+            // en permanence : 4 encarts plus 19 tuiles sous les commitments.
+            // Elles passent sous une banniere compacte, depliable au tap.
+            // La page ne montre plus que goals et commitments par defaut.
+            const al = alertState(data), bs = badgeState(data);
+            if (!al.length && !bs.total)
+                return null;
+            const warn = al.some((a) => a.tone === "red") ? C.red : C.gold;
+            const pill = (key, col, icon, label, count) => React.createElement("button", { key: key, onClick: () => setPanel(panel === key ? null : key), style: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 8px", borderRadius: 14, border: `1px solid ${panel === key ? col : col + "3d"}`, background: panel === key ? `${col}1f` : `${col}0d`, color: col, fontSize: 13, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", minWidth: 0 } },
+                React.createElement(Icon, { name: icon, size: 15, color: col }),
+                React.createElement("span", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, label),
+                React.createElement("span", { style: { fontWeight: 800, opacity: 0.75 } }, count));
+            return (React.createElement("div", { style: { marginTop: 4 } },
+                React.createElement("div", { style: { display: "flex", gap: 9 } },
+                    al.length > 0 && pill("alerts", warn, "bell", "Attention", al.length),
+                    bs.total > 0 && pill("badges", C.green, "crown", "Badges", bs.earnedCount + "/" + bs.total)),
+                panel === "alerts" && React.createElement("div", { style: { marginTop: 10 } }, al.map((a) => {
+                    const col = a.tone === "red" ? C.red : C.gold;
+                    return (React.createElement("div", { key: a.id, style: { background: `${col}0d`, border: `1px solid ${col}3d`, borderRadius: 14, padding: 13, marginBottom: 9 } },
+                        React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, color: col } }, a.title),
+                        React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 3, lineHeight: 1.45 } }, a.body)));
+                })),
+                panel === "badges" && React.createElement("div", { style: { marginTop: 10 } }, [["uber", "Uber"], ["income", "Revenus"], ["streak", "Series"], ["volume", "Volume"], ["milestone", "Jalons"]].map(([ck, cl]) => {
+                    const items = bs.list.filter((b) => b.cat === ck);
+                    if (!items.length)
+                        return null;
+                    return (React.createElement("div", { key: ck, style: { marginBottom: 12 } },
+                        React.createElement("div", { style: { fontSize: 11, color: C.textFaint, margin: "0 2px 7px", letterSpacing: 0.4 } }, cl),
+                        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 } }, items.map((b) => {
+                            const col = b.earned ? (C[b.tone] || C.green) : C.textFaint;
+                            return (React.createElement("div", { key: b.id, title: b.desc, style: { background: b.earned ? `${col}12` : "transparent", border: `1px solid ${b.earned ? col + "55" : C.line}`, borderRadius: 13, padding: "11px 5px", textAlign: "center", opacity: b.earned ? 1 : 0.4 } },
+                                React.createElement(Icon, { name: b.icon, size: 18, color: col }),
+                                React.createElement("div", { style: { fontSize: 10.5, fontWeight: 600, color: b.earned ? C.text : C.textFaint, marginTop: 6, lineHeight: 1.25 } }, b.name),
+                                b.on && React.createElement("div", { style: { fontSize: 9.5, color: C.textFaint, marginTop: 2 } }, shortDate(b.on))));
+                        }))));
+                }))));
         })(),
         React.createElement("div", { style: { height: 12 } })));
 }
@@ -3953,7 +4214,7 @@ function Settings({ data, setData, setTab, onOpenUndo }) {
             React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 4 } },
                 React.createElement("span", { style: { fontSize: 12, color: C.textDim, flex: 1, lineHeight: 1.4 } }, "Weekly set-aside target \u2014 the goal shown on your Plan This week bar"),
                 React.createElement("input", { value: com.weeklyTarget || "", inputMode: "decimal", placeholder: "$0", onChange: (e) => setCom("weeklyTarget", numOnly(e.target.value)), style: planInp })),
-            React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginBottom: 14, lineHeight: 1.5 } }, "Progress = what you allocate to goals during the week. Set 0 to hide the bar and show only your goals' real need."),
+            React.createElement("div", { style: { fontSize: 10.5, color: C.gold, marginBottom: 14, lineHeight: 1.5 } }, "Any value here OVERRIDES the weekly need Forge calculates from your commitments and deadlines. Leave at 0 to keep the calculated figure \u2014 that is almost always what you want."),
             React.createElement("div", { style: { fontSize: 12, color: C.textDim, marginBottom: 7 } }, "Payday"),
             React.createElement("div", { style: { display: "flex", gap: 5 } }, [["Mo", 1], ["Tu", 2], ["We", 3], ["Th", 4], ["Fr", 5], ["Sa", 6], ["Su", 0]].map(([l, n]) => (React.createElement("button", { key: n, onClick: () => setCom("paydayDow", n), style: { flex: 1, padding: "9px 0", borderRadius: 10, border: `1px solid ${(com.paydayDow ?? 4) === n ? C.blue : C.line}`, background: (com.paydayDow ?? 4) === n ? C.blue : "transparent", color: (com.paydayDow ?? 4) === n ? "#fff" : C.textDim, fontWeight: 700, fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" } }, l)))),
             React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", marginTop: 14 } },
@@ -4371,7 +4632,18 @@ function timesheetEstimate(p, cats, data) {
     const hours = h.regular + h.ot15 + h.ot2 + h.sat + h.sun + h.hol;
     const gross = rate * (h.regular * m.regular + h.ot15 * m.ot15 + h.ot2 * m.ot2 + h.sat * m.sat + h.sun * m.sun + h.hol * m.hol);
     const superAmt = gross * (p?.superRate ?? 0.12);
-    const tax = gross * currentSetAsideRate(data);
+    // V16.7 — une position TFN a deja son PAYG retenu a la source, et Luca
+    // saisit le montant reel a chaque paie. Lui appliquer le taux de
+    // provision ABN (32,5 % via le bareme) doublait l'impot sur son emploi.
+    // On estime au taux PAYG reellement observe sur ses paies, et a defaut 0.
+    const isTfn = (p?.kind || "tfn") !== "abn";
+    let tax = 0;
+    if (isTfn) {
+        const f = fySummary(data);
+        tax = gross * (f.tfnGross > 0 ? Math.min(0.47, f.withheld / f.tfnGross) : 0);
+    }
+    else
+        tax = gross * currentSetAsideRate(data);
     return { hours, gross, tax, superAmt, m };
 }
 function WorkSessionForm({ data, update, showToast, onClose }) {
