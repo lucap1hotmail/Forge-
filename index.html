@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v17.3";
+const APP_VERSION = "v17.4";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -3050,8 +3050,12 @@ function Spend({ data, update, openHistory, showToast, setTab }) {
                 "Filter",
                 React.createElement(Icon, { name: "filter", size: 14, color: C.textDim }))),
         (() => {
+            // V17.4 — Spend etait bloque sur 3 JOURS, ce qui rendait toute
+            // depense de plus de 72 h inaccessible a la correction. Income a
+            // ete passe a 10 semaines, Spend restait en arriere. 30 jours de
+            // detail : assez pour reclasser une depense du mois dernier.
             const days = Object.keys(grouped).sort().reverse();
-            const shown = days.slice(0, 3);
+            const shown = days.slice(0, 30);
             const hiddenCount = merged.length - shown.reduce((s2, day) => s2 + grouped[day].length, 0);
             return (React.createElement(React.Fragment, null,
                 shown.map((day) => {
@@ -3096,7 +3100,7 @@ function Spend({ data, update, openHistory, showToast, setTab }) {
                         })));
                 }),
                 hiddenCount > 0 && React.createElement("div", { style: { fontSize: 11, color: C.textFaint, textAlign: "center", padding: "4px 0 2px" } },
-                    "Showing last 3 days \u00B7 ",
+                    "Showing last 30 days \u00B7 ",
                     hiddenCount,
                     " more kept for stats & statements")));
         })(),
