@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v17.4";
+const APP_VERSION = "v17.9";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -1200,9 +1200,17 @@ const fySummary = memoCalc("fySummary", function (data) {
 // ─────────────────────────────────────────────────────────────
 const computeAccounts = memoCalc("computeAccounts", function (data) {
     const acc = data.accounts || { checking: 0, savings: 0, asOf: todayKey() };
-    const sinceTs = acc.asOfTs || ((acc.asOf || "0000-00-00") + "T23:59:59.999Z");
-    const tsOf = (x) => x.ts || ((x.date || x.week || "0000-00-00") + "T12:00:00.000Z");
-    const after = (x) => tsOf(x) > sinceTs;
+    // V17.8 — on compare sur la DATE D'OPERATION, pas sur l'heure de saisie.
+    // `ts` est l'horodatage du moment ou Luca tape la ligne : une entree
+    // antidatee (un virement du 30/07 saisi le 05/09) avait donc un ts
+    // posterieur au solde et etait recomptee, alors qu'elle est deja dedans.
+    // Resultat : +3 191 fantomes sur le Checking. `ts` ne sert plus qu'a
+    // departager deux operations du MEME jour, ce qui est son seul role legitime.
+    const sinceDay = acc.asOf || (acc.asOfTs || "0000-00-00").slice(0, 10);
+    const sinceTs = acc.asOfTs || (sinceDay + "T23:59:59.999Z");
+    const dayOf = (x) => (x.date || x.week || (x.ts || "").slice(0, 10) || "0000-00-00");
+    const tsOf = (x) => x.ts || (dayOf(x) + "T12:00:00.000Z");
+    const after = (x) => { const d = dayOf(x); return d > sinceDay || (d === sinceDay && tsOf(x) > sinceTs); };
     const incomeSince = (data.income || []).filter(after).reduce((s, i) => s + num(i.amount), 0);
     // Legacy : avant l'existence de `transfers`, un virement checking→savings
     // était enregistré comme une "dépense" de catégorie Saving. On continue de
@@ -1722,8 +1730,18 @@ function Commitments({ data, update }) {
             if (!p)
                 return;
             const amt = Math.max(0, Number(p.allocated || 0));
-            if (amt > 0)
-                (d.spend || (d.spend = [])).unshift({ id: uid(), name: p.name, amount: amt, cat: "Other", account: "checking", date: todayKey(), ts: nowTs(), note: "Spend from commitment: " + p.name });
+            if (amt > 0) {
+                // V17.6 — deux bugs ici. `cat` etait code en dur sur "Other",
+                // quelle que soit la nature du projet : toute depense issue
+                // d'un commitment atterrissait dans le fourre-tout. Et le
+                // libelle etait ecrit dans `name` alors que la liste Spend
+                // lit `label`, d'ou une ligne sans intitule. La categorie est
+                // desormais deduite de l'icone du projet, puisque le jeu est
+                // unifie depuis la v16.1 : une icone = une categorie.
+                const k = todayKey();
+                const hit = (typeof CAT_LIST !== "undefined" ? CAT_LIST : []).find((c) => (CAT_ICON[c] || [])[0] === (p.iconName || p.icon));
+                (d.spend || (d.spend = [])).unshift({ id: uid(), label: p.name, name: p.name, amount: amt, cat: hit || "Other", account: "checking", date: k, week: weekKeyOf(k), ts: nowTs(), note: "Spend from commitment: " + p.name });
+            }
             p.done = true;
         });
         setOpenId(null);
@@ -2940,6 +2958,7 @@ function Fixed({ data, update }) {
 //  SPEND
 // ─────────────────────────────────────────────────────────────
 function Spend({ data, update, openHistory, showToast, setTab }) {
+    const [allDays, setAllDays] = useState(false);
     const [per, setPer] = useState("month");
     const [note, setNote] = useState("");
     const [dayOpen, setDayOpen] = useState(null);
@@ -3009,8 +3028,8 @@ function Spend({ data, update, openHistory, showToast, setTab }) {
                     segs.length > 0 ? (React.createElement("div", { style: { display: "flex", justifyContent: "center", marginTop: 18 } },
                         React.createElement(Donut, { segments: segs, total: fmt(spent), size: 162, thickness: 26 }))) : React.createElement("div", { style: { fontSize: 12.5, color: C.textFaint, marginTop: 14 } }, "No spending recorded for this period."),
                     cats.length > 0 && React.createElement(React.Fragment, null,
-                        React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: 0.7, color: C.textDim, textTransform: "uppercase", marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.line}` } }, "Top categories"),
-                        cats.slice(0, 6).map(([c, v], i) => (React.createElement("div", { key: c, onClick: () => openHistory && openHistory({ cat: c }), style: { display: "flex", alignItems: "center", gap: 13, padding: "13px 0", borderTop: i === 0 ? "none" : `1px solid ${C.line}`, cursor: "pointer" } },
+                        React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: 0.7, color: C.textDim, textTransform: "uppercase", marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.line}` } }, "Categories"),
+                        cats.map(([c, v], i) => (React.createElement("div", { key: c, onClick: () => openHistory && openHistory({ cat: c }), style: { display: "flex", alignItems: "center", gap: 13, padding: "13px 0", borderTop: i === 0 ? "none" : `1px solid ${C.line}`, cursor: "pointer" } },
                             React.createElement("div", { style: { width: 38, height: 38, borderRadius: 99, border: `1.5px solid ${catTone(c)}`, background: `${catTone(c)}12`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } },
                                 React.createElement(Icon, { name: catIcon(c), size: 17, color: catTone(c) })),
                             React.createElement("div", { style: { flex: 1, minWidth: 0 } },
@@ -3054,8 +3073,11 @@ function Spend({ data, update, openHistory, showToast, setTab }) {
             // depense de plus de 72 h inaccessible a la correction. Income a
             // ete passe a 10 semaines, Spend restait en arriere. 30 jours de
             // detail : assez pour reclasser une depense du mois dernier.
+            // V17.7 — 7 jours deplies par defaut, le reste sous une banniere
+            // depliable. 30 jours ouverts en permanence noyaient l'ecran ;
+            // 3 jours rendaient toute correction impossible passe 72 h.
             const days = Object.keys(grouped).sort().reverse();
-            const shown = days.slice(0, 30);
+            const shown = allDays ? days : days.slice(0, 7);
             const hiddenCount = merged.length - shown.reduce((s2, day) => s2 + grouped[day].length, 0);
             return (React.createElement(React.Fragment, null,
                 shown.map((day) => {
@@ -3096,13 +3118,10 @@ function Spend({ data, update, openHistory, showToast, setTab }) {
                                         React.createElement("button", { onClick: () => setEditId(editing ? null : x.id), "aria-label": "Edit", style: { background: "transparent", border: "none", color: C.textFaint, fontSize: 13, cursor: "pointer", padding: 2 } }, "\u270E"),
                                         React.createElement("button", { onClick: () => (x._kind === "pay" ? delPay : del)(x.id), "aria-label": "Delete", style: { background: "transparent", border: "none", color: C.textFaint, fontSize: 14, cursor: "pointer", padding: 2 } }, "\u2715"))),
                                 editing && (React.createElement("div", { style: { marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.line}` } },
-                                    React.createElement(EditRow, { item: x, editing: true, onEdit: () => { }, onClose: () => setEditId(null), title: "", sub: "", val: "", tone: "red", fields: x._kind === "pay" ? [["amount", "num"], ["date", "date"]] : [["label", "text"], ["amount", "num"], ["date", "date"], ["note", "text"]], onSave: (patch) => { (x._kind === "pay" ? savePay : save)(x.id, patch); setEditId(null); }, onDel: () => (x._kind === "pay" ? delPay : del)(x.id) })))));
+                                    React.createElement(EditRow, { item: x, editing: true, onEdit: () => { }, onClose: () => setEditId(null), title: "", sub: "", val: "", tone: "red", fields: x._kind === "pay" ? [["amount", "num"], ["date", "date"]] : [["label", "text"], ["amount", "num"], ["cat", (data.categories || []).slice()], ["date", "date"], ["note", "text"]], onSave: (patch) => { (x._kind === "pay" ? savePay : save)(x.id, patch); setEditId(null); }, onDel: () => (x._kind === "pay" ? delPay : del)(x.id) })))));
                         })));
                 }),
-                hiddenCount > 0 && React.createElement("div", { style: { fontSize: 11, color: C.textFaint, textAlign: "center", padding: "4px 0 2px" } },
-                    "Showing last 30 days \u00B7 ",
-                    hiddenCount,
-                    " more kept for stats & statements")));
+                (hiddenCount > 0 || allDays) && React.createElement("button", { onClick: () => setAllDays(!allDays), style: { width: "100%", marginTop: 8, padding: "13px 0", borderRadius: 14, border: `1px solid ${C.line}`, background: C.bgCardHi, color: C.blue, fontSize: 13.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer" } }, allDays ? "Show last 7 days only" : `Show all history \u00B7 ${hiddenCount} more`)));
         })(),
         merged.length === 0 && React.createElement(Card, null,
             React.createElement(Empty, null, "No spend yet.")),
@@ -4454,8 +4473,14 @@ function History({ data, update, preset, onClose }) {
         if (week && weekKeyOf(t.date || "") !== week)
             return false;
         if (q.trim()) {
-            const s = q.trim().toLowerCase();
-            if (!(`${t.label} ${t.cat} ${t.amount}`.toLowerCase().includes(s)))
+            // V17.7 — `note` n'etait pas indexe et les accents n'etaient pas
+            // normalises : "splint" ne trouvait rien alors que le mot etait
+            // dans la note, et "hotel" ratait "Hotel". Deux angles morts pour
+            // le seul outil censé retrouver une vieille ligne.
+            const norm = (v) => String(v || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            const s = norm(q.trim());
+            const r = t.raw || {};
+            if (!(norm(`${t.label} ${t.cat} ${t.amount} ${r.note || ""} ${r.name || ""} ${r.source || ""} ${r.label || ""} ${r.employer || ""}`).includes(s)))
                 return false;
         }
         return true;
@@ -4590,6 +4615,10 @@ function History({ data, update, preset, onClose }) {
             }))));
 }
 function TxEditor({ t, buf, setBuf, cats, onSave, onDel }) {
+    // V17.9 — meme protection en deux temps que dans EditRow.
+    const [armed, setArmed] = useState(false);
+    useEffect(() => { if (!armed)
+        return; const tm = setTimeout(() => setArmed(false), 4000); return () => clearTimeout(tm); }, [armed]);
     const set = (k, v) => setBuf((x) => ({ ...x, [k]: v }));
     const src = t.src, raw = t.raw;
     return (React.createElement("div", { style: { marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}` } },
@@ -4625,7 +4654,7 @@ function TxEditor({ t, buf, setBuf, cats, onSave, onDel }) {
             React.createElement(DateField, { label: "Date", value: buf.date || "", onChange: (v) => set("date", v) }))),
         React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 4 } },
             React.createElement("button", { onClick: onSave, style: { flex: 1, padding: "12px 0", borderRadius: 10, border: "none", background: C.green, color: "#08210f", fontWeight: 800, fontSize: 14, fontFamily: "inherit", cursor: "pointer" } }, "Save"),
-            React.createElement("button", { onClick: onDel, style: { padding: "12px 16px", borderRadius: 10, border: `1px solid ${C.red}`, background: "transparent", color: C.red, fontWeight: 700, fontSize: 14, fontFamily: "inherit", cursor: "pointer" } }, "Delete"))));
+            React.createElement("button", { onClick: () => { if (armed) { setArmed(false); onDel(); } else setArmed(true); }, style: { padding: "12px 16px", borderRadius: 10, border: `1px solid ${C.red}`, background: armed ? C.red : "transparent", color: armed ? "#fff" : C.red, fontWeight: armed ? 800 : 700, fontSize: 14, fontFamily: "inherit", cursor: "pointer" } }, armed ? "Tap again" : "Delete"))));
 }
 function timesheetMults(p) {
     return { regular: 1, ot15: Number(p?.otMult || 1.5), ot2: Number(p?.ot2Mult || 2), sat: Number(p?.satMult || 1), sun: Number(p?.sunMult || 1), hol: Number(p?.holMult || 1) };
@@ -5207,6 +5236,15 @@ function Row({ k, v, tone }) {
 }
 function EditRow({ item, editing, onEdit, onClose, title, sub, val, tone, fields, onSave, onDel }) {
     const [local, setLocal] = useState({});
+    // V17.9 — la croix supprimait au premier tap, sans confirmation. Le
+    // panneau d'annulation existe mais il est enterre dans Settings et sa pile
+    // est perdue au rechargement : une ligne effacee par erreur etait
+    // irrecuperable. Premier tap = armement, second = suppression. Meme motif
+    // que l'avertissement de doublon a la saisie. L'armement se desarme seul
+    // au bout de 4 s pour ne pas rester actif dans le vide.
+    const [armed, setArmed] = useState(false);
+    useEffect(() => { if (!armed)
+        return; const t = setTimeout(() => setArmed(false), 4000); return () => clearTimeout(t); }, [armed]);
     useEffect(() => { if (editing) {
         const o = {};
         fields.forEach(([k]) => o[k] = item[k] ?? "");
@@ -5220,10 +5258,13 @@ function EditRow({ item, editing, onEdit, onClose, title, sub, val, tone, fields
                 sub && React.createElement("div", { style: { fontSize: 12, color: C.textFaint, marginTop: 1 } }, sub)),
             React.createElement("div", { style: { fontSize: 14, fontWeight: 700, color: col } }, val),
             React.createElement("button", { onClick: onEdit, style: delBtn }, "\u270E"),
-            React.createElement("button", { onClick: onDel, style: delBtn }, "\u2715")));
+            React.createElement("button", { onClick: () => { if (armed) { setArmed(false); onDel(); } else setArmed(true); }, style: armed ? { ...delBtn, background: C.red, color: "#fff", borderColor: C.red, fontWeight: 800 } : delBtn }, armed ? "Sure?" : "\u2715")));
     }
     return (React.createElement("div", { style: { padding: "10px 0", borderTop: `1px solid ${C.line}` } },
-        fields.map(([k, type]) => (React.createElement("div", { key: k, style: { marginBottom: 8 } }, type === "date" ? (React.createElement("input", { type: "date", value: local[k] || "", onChange: (e) => setLocal({ ...local, [k]: e.target.value }), style: inp })) : (React.createElement("input", { value: local[k] ?? "", inputMode: type === "num" ? "decimal" : "text", onChange: (e) => setLocal({ ...local, [k]: type === "num" ? numText(e.target.value) : e.target.value }), placeholder: k, style: inp }))))),
+        // V17.7 — troisieme type de champ : la liste. Sans elle la categorie
+        // n'etait modifiable nulle part, et il fallait supprimer puis ressaisir
+        // une depense pour la reclasser. Un `type` tableau devient un select.
+        fields.map(([k, type]) => (React.createElement("div", { key: k, style: { marginBottom: 8 } }, Array.isArray(type) ? (React.createElement("select", { value: local[k] ?? "", onChange: (e) => setLocal({ ...local, [k]: e.target.value }), style: { ...inp, colorScheme: "dark" } }, type.map((o) => React.createElement("option", { key: o, value: o }, o)))) : type === "date" ? (React.createElement("input", { type: "date", value: local[k] || "", onChange: (e) => setLocal({ ...local, [k]: e.target.value }), style: inp })) : (React.createElement("input", { value: local[k] ?? "", inputMode: type === "num" ? "decimal" : "text", onChange: (e) => setLocal({ ...local, [k]: type === "num" ? numText(e.target.value) : e.target.value }), placeholder: k, style: inp }))))),
         React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 4 } },
             React.createElement("button", { onClick: () => { const patch = {}; fields.forEach(([k, type]) => patch[k] = type === "num" ? Number(local[k]) : local[k]); onSave(patch); }, style: { ...chip(C.green), padding: "10px 0" } }, "Save"),
             React.createElement("button", { onClick: onClose, style: { ...chip(C.textDim), padding: "10px 0" } }, "Cancel"))));
