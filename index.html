@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v17.9";
+const APP_VERSION = "v18.4";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -367,6 +367,7 @@ function App() {
     const undoRef = useRef([]); // [{ before, ts }] session-only, most recent last
     const [undoTick, setUndoTick] = useState(0);
     const [undoOpen, setUndoOpen] = useState(false);
+    const [alertsOpen, setAlertsOpen] = useState(false);
     useEffect(() => {
         (async () => {
             try {
@@ -520,7 +521,7 @@ function App() {
     return (React.createElement("div", { style: { minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'DM Sans', system-ui, sans-serif" } },
         React.createElement("style", null, css),
         React.createElement("div", { style: { maxWidth: 480, margin: "0 auto", paddingBottom: 92, paddingTop: "max(env(safe-area-inset-top), 14px)" } },
-            React.createElement(Header, { data: data, setTab: setTab, tab: tab, openHistory: openHistory }),
+            React.createElement(Header, { data: data, setTab: setTab, tab: tab, openHistory: openHistory, onOpenAlerts: () => setAlertsOpen(true) }),
             ["income", "spend", "tax", "plan"].includes(tab) && React.createElement("div", { style: { height: 3, background: TAB_ON[tab], borderRadius: 2, margin: "0 20px 2px" } }),
             React.createElement(DomainCtx.Provider, { value: DOMAIN[tab] || C.textFaint },
                 React.createElement(ErrorBoundary, { key: tab },
@@ -533,7 +534,7 @@ function App() {
                         tab === "tax" && React.createElement(Tax, { data: data, update: update, openWork: () => setWorkOpen(true), openHistory: openHistory, setTab: setTab }),
                         tab === "plan" && React.createElement(Plan, { data: data, update: update, onCelebrate: setCelebrate }),
                         tab === "trends" && React.createElement(Trends, { data: data, openHistory: openHistory, update: update }),
-                        tab === "settings" && React.createElement(Settings, { data: data, setData: setData, setTab: setTab, onOpenUndo: () => setUndoOpen(true) }))))),
+                        tab === "settings" && React.createElement(Settings, { data: data, setData: setData, setTab: setTab, onOpenUndo: () => setUndoOpen(true), onOpenSearch: () => openHistory({}) }))))),
         React.createElement(TabBar, { tab: tab, setTab: setTab }),
         celebrate && React.createElement(Celebration, { goal: celebrate, onDone: () => setCelebrate(null) }),
         toast && (React.createElement("div", { style: { position: "fixed", left: "50%", bottom: "88px", transform: "translateX(-50%)", zIndex: 70, background: C.bgCardHi, border: `1px solid ${C.green}`, color: C.text, borderRadius: 14, padding: "12px 16px", boxShadow: "0 10px 30px rgba(0,0,0,.5)", maxWidth: "90%", minWidth: 240 } },
@@ -545,6 +546,30 @@ function App() {
             "\uD83C\uDFC6 New record",
             recordFlash.pct != null ? ` · previous beaten by ${recordFlash.pct}%` : "")),
         histFilter && React.createElement(History, { data: data, update: update, preset: histFilter, onClose: () => setHistFilter(null) }),
+        alertsOpen && data && (() => {
+            const al = alertState(data);
+            const unread = al.filter((a) => !a.seen && !a.standing).length;
+            const markRead = (id) => update((d) => { d.seenAlerts = d.seenAlerts || {}; d.seenAlerts[id] = todayKey(); });
+            return React.createElement("div", { onClick: () => setAlertsOpen(false), style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 240, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 78 } },
+                React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "calc(100% - 28px)", maxWidth: 560, maxHeight: "72vh", overflowY: "auto", background: C.bgCard, border: `1px solid ${C.line}`, borderRadius: 20, padding: 16, boxShadow: "0 24px 60px -20px rgba(0,0,0,.9)" } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 13 } },
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontSize: 16.5, fontWeight: 700, color: C.text } }, "Notifications"),
+                            React.createElement("div", { style: { fontSize: 11.5, color: C.textFaint, marginTop: 2 } }, unread > 0 ? unread + (unread > 1 ? " non lues \u00B7 tape pour marquer" : " non lue \u00B7 tape pour marquer") : "Tout est lu")),
+                        React.createElement("button", { onClick: () => setAlertsOpen(false), style: { background: "transparent", border: "none", color: C.textFaint, fontSize: 19, cursor: "pointer", fontFamily: "inherit" } }, "\u2715")),
+                    al.length === 0 && React.createElement("div", { style: { fontSize: 13.5, color: C.textDim, padding: "18px 2px", textAlign: "center" } }, "Rien ne demande ton attention."),
+                    al.map((a) => {
+                        const col = a.tone === "red" ? C.red : a.tone === "green" ? C.green : C.gold;
+                        const dim = a.seen || a.standing;
+                        return React.createElement("div", { key: a.id, onClick: () => { if (!a.seen && !a.standing) markRead(a.id); }, style: { background: dim ? "transparent" : `${col}0d`, border: `1px solid ${dim ? C.line : col + "3d"}`, borderRadius: 14, padding: 13, marginBottom: 9, cursor: a.standing ? "default" : "pointer", opacity: a.seen ? 0.5 : 1, display: "flex", gap: 11 } },
+                            React.createElement("span", { style: { width: 7, height: 7, borderRadius: 99, background: dim ? "transparent" : col, flexShrink: 0, marginTop: 5 } }),
+                            React.createElement("div", { style: { minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, color: dim ? C.textDim : col } }, a.title),
+                                React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 3, lineHeight: 1.45 } }, a.body),
+                                a.standing && React.createElement("div", { style: { fontSize: 10.5, color: C.textFaint, marginTop: 5 } }, "Permanent \u00B7 ne compte pas dans le badge")));
+                    }),
+                    React.createElement("button", { onClick: () => { setAlertsOpen(false); setTab("plan"); }, style: { width: "100%", marginTop: 4, padding: "13px 0", borderRadius: 12, border: `1px solid ${C.line}`, background: C.bgCardHi, color: C.blue, fontSize: 13.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer" } }, "Ouvrir Plan")));
+        })(),
         undoOpen && React.createElement(UndoPanel, { stack: undoRef.current, current: data, onRestore: undoRestore, onRestoreSnap: restoreSnapshot, onClose: () => setUndoOpen(false) }),
         workOpen && React.createElement(WorkSessionForm, { data: data, update: update, showToast: showToast, onClose: () => setWorkOpen(false) })));
 }
@@ -618,6 +643,11 @@ function migrate(d) {
     // V16 — badges gagnes, gardes pour toujours. { id: { date, value } }.
     if (!d.badges || typeof d.badges !== "object")
         d.badges = {};
+    // V18.2 — notifications lues, une par une. { id: dateISO }. La cle porte
+    // la valeur declenchante (ex: "bal-low:155.45") : si le solde rebaisse
+    // encore apres coup, c'est une NOUVELLE notification, pas l'ancienne.
+    if (!d.seenAlerts || typeof d.seenAlerts !== "object")
+        d.seenAlerts = {};
     // V16 — purge unique des cles ecrites mais jamais lues, sur le modele de
     // d.sessions. `allocation` etait un pipeline complet (defaut, migration,
     // nettoyage) qui ne menait a aucun affichage ; `uberMax` et
@@ -875,7 +905,7 @@ function useTotals(data) {
 // ─────────────────────────────────────────────────────────────
 //  HEADER  —  date prominent · streak discreet (corner)
 // ─────────────────────────────────────────────────────────────
-function Header({ data, setTab, tab, openHistory }) {
+function Header({ data, setTab, tab, openHistory, onOpenAlerts }) {
     const circBtn = { width: 38, height: 38, borderRadius: 99, border: `1px solid ${C.line}`, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", color: C.textDim, cursor: "pointer", flexShrink: 0 };
     const todayLabel = new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
     return (React.createElement("div", { style: { padding: "16px 18px 6px" } },
@@ -885,8 +915,16 @@ function Header({ data, setTab, tab, openHistory }) {
                 React.createElement("span", { style: { fontSize: 23, fontWeight: 800, letterSpacing: 2.5, textTransform: "uppercase", color: C.text } }, "Forge"),
                 React.createElement("span", { style: { fontSize: 11, fontWeight: 600, color: C.textFaint, letterSpacing: 0.5 } }, APP_VERSION)),
             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11 } },
-                React.createElement("button", { onClick: () => openHistory && openHistory({}), "aria-label": "Search", style: circBtn },
-                    React.createElement(Icon, { name: "search", size: 17, color: C.textDim })),
+                (() => {
+                    // V18.1 — la loupe part dans Settings, la cloche prend sa
+                    // place : les alertes vivaient tout en bas de Plan, le
+                    // dernier endroit ou on regarde. Le compteur est global,
+                    // donc visible depuis n'importe quel ecran.
+                    const n = alertCount(data);
+                    return React.createElement("button", { onClick: () => onOpenAlerts && onOpenAlerts(), "aria-label": "Notifications", style: { ...circBtn, position: "relative" } },
+                        React.createElement(Icon, { name: "bell", size: 18, color: n ? C.text : C.textDim }),
+                        n > 0 && React.createElement("span", { style: { position: "absolute", top: -4, right: -4, minWidth: 20, height: 20, padding: "0 5px", borderRadius: 99, background: C.blue, color: "#fff", fontSize: 11.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${C.bg}`, boxSizing: "border-box" } }, n));
+                })(),
                 React.createElement("button", { onClick: () => setTab("settings"), "aria-label": "Settings", style: circBtn },
                     React.createElement(Icon, { name: "gear", size: 18, color: C.textDim })))),
         React.createElement("div", { style: { fontSize: 12.5, color: C.textFaint, marginTop: 4 } }, todayLabel)));
@@ -1324,7 +1362,16 @@ function livingBuffer(data) {
     from.setHours(0, 0, 0, 0);
     const pay = nextPayDate(data, from);
     let dated = 0, estimate = 0;
+    // V18.4 — une facture DEJA PAYEE pour sa periode ne doit plus compter
+    // comme "a venir". Elle etait comptee deux fois : une fois en paiement,
+    // qui sort du solde, une fois ici en depense a provisionner. Marquer
+    // l'ecole payee faisait donc plonger Available now de 1 000 au lieu de
+    // le laisser inchange. `isPaidNow` reprend exactement le test de l'ecran
+    // Fixed, pour que les deux ecrans ne puissent pas diverger.
+    const isPaidNow = (f) => (data.payments || []).some((p) => p.fixedId === f.id && p.period === periodKey(f.cadence));
     (data.fixed || []).forEach((f) => {
+        if (isPaidNow(f))
+            return;
         const nb = effectiveDueDate(f, from);
         if (nb) {
             if (nb <= pay)
@@ -1541,8 +1588,15 @@ const taxDebtStatus = memoCalc("taxDebtStatus", function (data) {
 // besoin hebdo complet en negatif (-1152 sur ses donnees) alors que rien
 // n'allait mal. Verifie en simulation : le dimanche soir les deux methodes
 // donnent le meme chiffre, on ne perd donc aucune information.
+// V18 — semaine CALENDAIRE lundi->dimanche, plus de fenetre glissante.
+// Luca encaisse en continu : gros virements Uber le lundi, paie principale le
+// mardi, virements Uber epars le reste du temps. Une fenetre qui glisse perd
+// par l'arriere les jours les plus riches et faisait passer la semaine de
+// +1475 a +742 sans qu'il ait rien fait de mal. Bloquee sur la semaine, la
+// mesure se reinitialise et redevient comparable d'une semaine a l'autre.
+// Le besoin, lui, est proratise ailleurs pour ne pas hurler le lundi matin.
 const rolling7Net = memoCalc("rolling7Net", function (data) {
-    const end = todayKey(), start = new Date(new Date(end) - 6 * 864e5).toISOString().slice(0, 10);
+    const end = todayKey(), start = weekKeyOf(end);
     const inWin = (k) => (k || "") >= start && (k || "") <= end;
     const rate = currentSetAsideRate(data);
     let net = 0;
@@ -1620,24 +1674,81 @@ const badgeState = memoCalc("badgeState", function (data) {
 // Alertes : deliberement SEPAREES des badges. Une medaille et un
 // avertissement dans la meme liste, ca brouille les deux.
 const alertState = memoCalc("alertState", function (data) {
-    const S = weeklySeries(data), out = [];
-    if (S.length >= 2) {
-        const last = S[S.length - 2]; // derniere semaine CLOSE
-        const hist = S.slice(0, -2);
-        const avgSp = hist.length ? hist.reduce((s, w) => s + w.spend, 0) / hist.length : 0;
-        // `ext` compte ici : une depense couverte par un don n'est pas un derapage.
-        if (last.spend > last.income + last.ext)
-            out.push({ id: "spend-over", tone: "red", title: "Depenses superieures aux revenus", body: `Semaine du ${shortDate(last.week)} : ${fmt(last.spend)} depenses pour ${fmt(last.income + last.ext)} entres.` });
-        if (hist.length >= 3 && avgSp > 0 && last.spend > avgSp * 1.4)
-            out.push({ id: "spend-spike", tone: "gold", title: "Depenses au-dessus de ta moyenne", body: `${fmt(last.spend)} contre ${fmt(avgSp)} en moyenne.` });
+    const out = [];
+    const S = weeklySeries(data);
+    const acc = computeAccounts(data);
+    // 1. Solde bas ou negatif. computeAccounts le savait deja, rien ne le
+    //    remontait : c'est le cas d'usage bancaire le plus quotidien.
+    if (acc.checking < 50)
+        out.push({ id: "bal-low:" + acc.checking.toFixed(2), tone: acc.checking < 0 ? "red" : "gold", cat: "cash",
+            title: acc.checking < 0 ? "Compte courant à découvert" : "Compte courant bas",
+            body: `${fmt(acc.checking)} sur le checking.` + (acc.savings > 0 ? ` ${fmt(acc.savings)} disponibles en savings si tu dois virer.` : "") });
+    // 2. Le solde saisi vieillit : passe 14 jours l'estimation derive.
+    const asOf = (data.accounts && data.accounts.asOf) || todayKey();
+    const staleBal = Math.round((new Date(todayKey()) - new Date(asOf + "T00:00:00")) / DAY_MS);
+    if (staleBal >= 14)
+        out.push({ id: "bal-stale:" + asOf, tone: "gold", cat: "cash", title: "Ton solde date de " + staleBal + " jours",
+            body: `Saisi le ${shortDate(asOf)}. Au-dela de deux semaines l'estimation s'ecarte de ta banque — verifie et remets-le a jour.` });
+    // 3. Heures visa. Seul point ou une erreur a des consequences legales.
+    const vt = visaHoursTally(data);
+    if (vt.status !== "ok")
+        out.push({ id: "visa:" + vt.start + ":" + vt.status, tone: vt.status === "over" ? "red" : "gold", cat: "visa",
+            title: vt.status === "over" ? "Plafond visa depasse" : "Plafond visa approche",
+            body: `${Math.round(vt.hours * 10) / 10}h sur ${vt.cap}h pour la quinzaine du ${shortDate(vt.start)}.` });
+    // 4. Decouvert avant la prochaine paie. cashShortfall calcule deja le
+    //    manque ET l'ordre de report ; la fonction n'etait affichee nulle part.
+    const cs = cashShortfall(data);
+    if (cs.short > 0)
+        out.push({ id: "short:" + cs.short.toFixed(2), tone: "red", cat: "cash", title: "Il manque " + fmt(cs.short) + " avant ta paie",
+            body: `${fmt(cs.needed)} a couvrir, ${fmt(cs.liquid)} disponibles.` + (cs.suggestions[0] ? ` A reporter en premier : ${cs.suggestions[0].name}.` : "") });
+    // 5. Echeance qui approche sans provision suffisante.
+    for (const p of (data.commitments && data.commitments.projects) || []) {
+        if (p.done || !p.due)
+            continue;
+        const st = commitmentSteps(data, p);
+        const wl = Math.max(0, Math.ceil((new Date(p.due) - new Date(todayKey())) / (7 * DAY_MS)));
+        if (st.remaining > 0 && wl <= 6)
+            out.push({ id: "due:" + p.id + ":" + wl, tone: wl <= 2 ? "red" : "gold", cat: "commit",
+                title: `${p.name} : ${wl <= 0 ? "echeance atteinte" : wl + (wl > 1 ? " semaines" : " semaine") + " restantes"}`,
+                body: `${fmt(st.remaining)} encore a trouver.` + (st.staleDays != null ? ` Rien mis de cote depuis ${st.staleDays} jours.` : "") });
     }
+    // 6. Records et badges : le bandeau dore disparait en 6 secondes. S'il ne
+    //    regarde pas l'ecran a cet instant precis, il ne le sait jamais.
+    const bs = badgeState(data);
+    const fresh = bs.list.filter((b) => b.earned && b.on && Math.round((new Date(todayKey()) - new Date(b.on + "T00:00:00")) / DAY_MS) <= 7);
+    // Groupes des le 2e : au premier deploiement il en debloque douze d'un
+    // coup, et douze lignes vertes identiques noient les vraies alertes.
+    if (fresh.length === 1)
+        out.push({ id: "badge:" + fresh[0].id, tone: "green", cat: "win", title: "Badge debloque \u00B7 " + fresh[0].name, body: fresh[0].desc });
+    else if (fresh.length > 1)
+        out.push({ id: "badges:" + fresh.map((b) => b.id).join(","), tone: "green", cat: "win",
+            title: fresh.length + " badges debloques", body: fresh.map((b) => b.name).join(" \u00B7 ") });
+    // 7. Depenses superieures aux revenus sur la derniere semaine CLOSE.
+    //    `ext` compte : une depense couverte par un don n'est pas un derapage.
+    if (S.length >= 2) {
+        const last = S[S.length - 2];
+        if (last.spend > last.income + last.ext)
+            out.push({ id: "spend-over:" + last.week, tone: "red", cat: "spend", title: "Depenses superieures aux revenus",
+                body: `Semaine du ${shortDate(last.week)} : ${fmt(last.spend)} depenses pour ${fmt(last.income + last.ext)} entres.` });
+    }
+    // 8. Rythme hebdo, proratise sur les jours ecoules.
+    const w = weeklyEarnNeed(data);
+    if (!w.onPace)
+        out.push({ id: "pace:" + weekKeyOf(todayKey()), tone: "red", cat: "week", title: "Besoin hebdomadaire non couvert",
+            body: `${fmt(w.takeHome)} encaisses cette semaine, ${fmt(w.dueSoFar)} attendus a ce stade. Objectif : ${fmt(w.total)}.` });
+    // La dette fiscale reste visible mais ne compte PAS dans le badge : elle
+    // est permanente tant qu'il conduit, et une pastille allumee en continu
+    // devient invisible en une semaine.
     const td = taxDebtStatus(data);
     if (td.stock > 0)
-        out.push({ id: "tax-debt", tone: "gold", title: "Dette fiscale en cours", body: `${fmt(td.stock)} dus, en hausse de ${fmt(td.flow)} par semaine au rythme actuel.` });
-    const w = weeklyEarnNeed(data);
-    if (w.surplus < 0)
-        out.push({ id: "surplus-neg", tone: "red", title: "Besoin hebdomadaire non couvert", body: `Il manque ${fmt(Math.abs(w.surplus))} sur les 7 derniers jours pour tenir ${fmt(w.total)}.` });
-    return out;
+        out.push({ id: "tax-debt", tone: "gold", cat: "tax", standing: true, title: "Dette fiscale en cours",
+            body: `${fmt(td.stock)} dus, en hausse de ${fmt(td.flow)} par semaine au rythme actuel.` });
+    const seen = data.seenAlerts || {};
+    return out.map((a) => ({ ...a, seen: !!seen[a.id] }));
+});
+// Compteur du badge : uniquement le non-lu, et jamais les alertes permanentes.
+const alertCount = memoCalc("alertCount", function (data) {
+    return alertState(data).filter((a) => !a.seen && !a.standing).length;
 });
 const weeklyEarnNeed = memoCalc("weeklyEarnNeed", function (data) {
     const fixedWeekly = (data.fixed || []).reduce((s, f) => s + toWeeklyAmt(Number(f.amount) || 0, f.cadence), 0);
@@ -1649,7 +1760,11 @@ const weeklyEarnNeed = memoCalc("weeklyEarnNeed", function (data) {
     // qu'elle reste dissociable partout, et que le Runway de Home ne bouge pas.
     const taxWeekly = taxDebtStatus(data).weeklyRequired;
     const takeHome = rolling7Net(data);
-    return { fixedWeekly, commitWeekly, total, taxWeekly, totalWithTax: total + taxWeekly, takeHome, surplus: takeHome - total, surplusAfterTax: takeHome - total - taxWeekly };
+    // Part de la semaine ecoulee : lundi = 1/7, dimanche = 7/7. Sert a juger
+    // si le retard est reel ou si la semaine n'a simplement pas fini de payer.
+    const elapsed = Math.min(1, Math.max(1, Math.round((new Date(todayKey()) - new Date(weekKeyOf(todayKey()))) / 864e5) + 1) / 7);
+    const dueSoFar = total * elapsed;
+    return { fixedWeekly, commitWeekly, total, taxWeekly, totalWithTax: total + taxWeekly, takeHome, elapsed, dueSoFar, onPace: takeHome >= dueSoFar, surplus: takeHome - total, surplusAfterTax: takeHome - total - taxWeekly };
 });
 // Runway : si les revenus s'arrêtaient aujourd'hui, combien de semaines le
 // cash actuel couvre-t-il le coût structurel moyen (factures fixes +
@@ -3282,7 +3397,7 @@ function Plan({ data, update, onCelebrate }) {
                 React.createElement("span", { style: { fontWeight: 800, opacity: 0.75 } }, count));
             return (React.createElement("div", { style: { marginTop: 4 } },
                 React.createElement("div", { style: { display: "flex", gap: 9 } },
-                    al.length > 0 && pill("alerts", warn, "bell", "Attention", al.length),
+                    al.length > 0 && pill("alerts", warn, "bell", "Attention", alertCount(data) || al.length),
                     bs.total > 0 && pill("badges", C.green, "crown", "Badges", bs.earnedCount + "/" + bs.total)),
                 panel === "alerts" && React.createElement("div", { style: { marginTop: 10 } }, al.map((a) => {
                     const col = a.tone === "red" ? C.red : C.gold;
@@ -4125,7 +4240,7 @@ function CategoryManager({ data, setData }) {
             React.createElement("input", { value: nm, onChange: (e) => setNm(e.target.value), placeholder: "New category\u2026", style: { ...FS.field, flex: 1, padding: "12px 14px", fontSize: 14 } }),
             React.createElement("button", { onClick: add, style: { padding: "0 20px", borderRadius: 12, border: "none", background: C.green, color: "#062611", fontWeight: 700, fontSize: 14.5, fontFamily: "inherit", cursor: "pointer", flexShrink: 0 } }, "Add"))));
 }
-function Settings({ data, setData, setTab, onOpenUndo }) {
+function Settings({ data, setData, setTab, onOpenUndo, onOpenSearch }) {
     const [copied, setCopied] = useState(false);
     const com = data.commitments || {};
     const setCom = (k, v) => setData((prev) => ({ ...prev, commitments: { ...(prev.commitments || { projects: [] }), [k]: v } }));
@@ -4264,6 +4379,7 @@ function Settings({ data, setData, setTab, onOpenUndo }) {
                     "Opens the share sheet \u2192 choose ",
                     React.createElement("b", null, "Save to Files"),
                     ". No more copy-paste. To restore: Import, then pick the file's text."),
+                React.createElement("button", { onClick: () => onOpenSearch && onOpenSearch(), style: { background: "transparent", border: `1px solid ${C.line}`, color: C.text, borderRadius: 10, width: "100%", padding: "12px 0", fontSize: 14, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", marginTop: 10 } }, "\u2315 Search transactions"),
                 React.createElement("button", { onClick: onOpenUndo, style: { background: "transparent", border: `1px solid ${C.line}`, color: C.text, borderRadius: 10, width: "100%", padding: "12px 0", fontSize: 14, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", marginTop: 10 } }, "\u21B6 Undo / History"),
                 !impOpen ? (React.createElement("button", { onClick: () => { setImpOpen(true); setImpMsg(null); }, style: { ...chip(C.blue), flex: "none", width: "100%", padding: "12px 0", fontSize: 14, marginTop: 10 } }, "Import (JSON)")) : (React.createElement("div", { style: { marginTop: 10 } },
                     React.createElement("div", { style: { fontSize: 12, color: C.textDim, marginBottom: 8, lineHeight: 1.45 } }, "Restore from a saved backup file (recommended) \u2014 or paste below. This replaces all current data."),
