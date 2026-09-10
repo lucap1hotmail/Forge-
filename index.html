@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v18.4";
+const APP_VERSION = "v19.0";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -1628,51 +1628,128 @@ const weeklySeries = memoCalc("weeklySeries", function (data) {
 // Paliers plutot que "bats ton record" : un record ne se regagne pas, un
 // palier se collectionne. Seuils cales sur le backtest de son historique
 // pour qu'ils soient ni offerts ni inatteignables.
+// V19 — jeu de badges refondu. Regles : rien qui demande une donnee que Luca
+// ne saisit pas deja (pas de nombre de courses, pas d'heure de shift, pas de
+// donnees d'ecole), et rien qui soit offert au premier chargement. Les
+// paliers sont cales sur son historique reel pour etre ni acquis ni hors
+// d'atteinte. Cinq familles.
 const BADGE_DEFS = [
-    { id: "uber-wk-250", cat: "uber", icon: "car", tone: "blue", name: "Uber $250", desc: "$250 brut Uber sur une semaine" },
-    { id: "uber-wk-500", cat: "uber", icon: "car", tone: "blue", name: "Uber $500", desc: "$500 brut Uber sur une semaine" },
-    { id: "uber-wk-750", cat: "uber", icon: "car", tone: "blue", name: "Uber $750", desc: "$750 brut Uber sur une semaine" },
-    { id: "uber-wk-1000", cat: "uber", icon: "car", tone: "gold", name: "Uber $1000", desc: "$1000 brut Uber sur une semaine" },
-    { id: "inc-wk-1500", cat: "income", icon: "invest", tone: "green", name: "Semaine $1.5k", desc: "$1500 de revenus sur une semaine" },
-    { id: "inc-wk-2000", cat: "income", icon: "invest", tone: "green", name: "Semaine $2k", desc: "$2000 de revenus sur une semaine" },
-    { id: "inc-wk-2500", cat: "income", icon: "invest", tone: "gold", name: "Semaine $2.5k", desc: "$2500 de revenus sur une semaine" },
-    { id: "streak-4", cat: "streak", icon: "bolt", tone: "orange", name: "4 semaines", desc: "4 semaines d'affilee au-dessus du besoin" },
-    { id: "streak-8", cat: "streak", icon: "bolt", tone: "orange", name: "8 semaines", desc: "8 semaines d'affilee au-dessus du besoin" },
-    { id: "streak-12", cat: "streak", icon: "bolt", tone: "gold", name: "12 semaines", desc: "12 semaines d'affilee au-dessus du besoin" },
-    { id: "streak-26", cat: "streak", icon: "bolt", tone: "gold", name: "26 semaines", desc: "Six mois d'affilee au-dessus du besoin" },
-    { id: "hrs-100", cat: "volume", icon: "bag", tone: "teal", name: "100 heures", desc: "100 heures travaillees, tous jobs" },
-    { id: "hrs-500", cat: "volume", icon: "bag", tone: "teal", name: "500 heures", desc: "500 heures travaillees, tous jobs" },
-    { id: "hrs-1000", cat: "volume", icon: "bag", tone: "gold", name: "1000 heures", desc: "1000 heures travaillees, tous jobs" },
-    { id: "tracked-12", cat: "volume", icon: "cap", tone: "violet", name: "Un trimestre", desc: "12 semaines de suivi" },
-    { id: "tracked-26", cat: "volume", icon: "cap", tone: "violet", name: "Six mois", desc: "26 semaines de suivi" },
-    { id: "tracked-52", cat: "volume", icon: "cap", tone: "gold", name: "Un an", desc: "52 semaines de suivi" },
-    { id: "commit-done", cat: "milestone", icon: "shield", tone: "green", name: "Premier engagement tenu", desc: "Un commitment mene a son terme" },
-    { id: "goal-done", cat: "milestone", icon: "piggy", tone: "green", name: "Premier objectif atteint", desc: "Un goal atteint a 100%" },
+    // — UBER —
+    { id: "ub-h-100", cat: "uber", icon: "car", tone: "blue", name: "100 heures", desc: "100 heures de conduite cumulees" },
+    { id: "ub-h-500", cat: "uber", icon: "car", tone: "blue", name: "500 heures", desc: "500 heures de conduite cumulees" },
+    { id: "ub-h-1000", cat: "uber", icon: "car", tone: "gold", name: "1 000 heures", desc: "1 000 heures de conduite cumulees" },
+    { id: "ub-h-5000", cat: "uber", icon: "car", tone: "gold", name: "5 000 heures", desc: "5 000 heures de conduite cumulees" },
+    { id: "ub-km-1000", cat: "uber", icon: "plane", tone: "teal", name: "1 000 km", desc: "1 000 km parcourus" },
+    { id: "ub-km-5000", cat: "uber", icon: "plane", tone: "teal", name: "5 000 km", desc: "5 000 km parcourus" },
+    { id: "ub-km-10000", cat: "uber", icon: "plane", tone: "teal", name: "10 000 km", desc: "10 000 km parcourus" },
+    { id: "ub-km-25000", cat: "uber", icon: "plane", tone: "gold", name: "25 000 km", desc: "25 000 km parcourus" },
+    { id: "ub-ph-40", cat: "uber", icon: "bolt", tone: "orange", name: "$40 / heure", desc: "Un shift a plus de $40 brut par heure" },
+    { id: "ub-ph-50", cat: "uber", icon: "bolt", tone: "orange", name: "$50 / heure", desc: "Un shift a plus de $50 brut par heure" },
+    { id: "ub-ph-60", cat: "uber", icon: "bolt", tone: "orange", name: "$60 / heure", desc: "Un shift a plus de $60 brut par heure" },
+    { id: "ub-ph-75", cat: "uber", icon: "bolt", tone: "gold", name: "$75 / heure", desc: "Un shift a plus de $75 brut par heure" },
+    // — REVENUS —
+    { id: "wk-1000", cat: "income", icon: "invest", tone: "green", name: "Semaine $1k", desc: "$1 000 encaisses sur une semaine" },
+    { id: "wk-2500", cat: "income", icon: "invest", tone: "green", name: "Semaine $2.5k", desc: "$2 500 encaisses sur une semaine" },
+    { id: "wk-5000", cat: "income", icon: "invest", tone: "gold", name: "Semaine $5k", desc: "$5 000 encaisses sur une semaine" },
+    { id: "mo-5000", cat: "income", icon: "invest", tone: "green", name: "Mois $5k", desc: "$5 000 encaisses sur un mois" },
+    { id: "mo-7500", cat: "income", icon: "invest", tone: "green", name: "Mois $7.5k", desc: "$7 500 encaisses sur un mois" },
+    { id: "mo-10000", cat: "income", icon: "invest", tone: "gold", name: "Mois $10k", desc: "$10 000 encaisses sur un mois" },
+    { id: "mo-15000", cat: "income", icon: "invest", tone: "gold", name: "Mois $15k", desc: "$15 000 encaisses sur un mois" },
+    { id: "mo-20000", cat: "income", icon: "invest", tone: "gold", name: "Mois $20k", desc: "$20 000 encaisses sur un mois" },
+    // — TRAVAIL —
+    { id: "hr-40", cat: "work", icon: "bag", tone: "violet", name: "40 heures", desc: "40 heures sur une semaine, tous jobs" },
+    { id: "hr-50", cat: "work", icon: "bag", tone: "violet", name: "50 heures", desc: "50 heures sur une semaine, tous jobs" },
+    { id: "hr-60", cat: "work", icon: "bag", tone: "gold", name: "60 heures", desc: "60 heures sur une semaine, tous jobs" },
+    { id: "wk-7-7", cat: "work", icon: "hammer", tone: "violet", name: "7 jours sur 7", desc: "Une semaine travaillee tous les jours" },
+    { id: "three-src", cat: "work", icon: "crown", tone: "gold", name: "Trois sources", desc: "Trois sources de revenu la meme semaine" },
+    // — DISCIPLINE —
+    { id: "nsp-3", cat: "discipline", icon: "shield", tone: "teal", name: "3 jours", desc: "3 jours d'affilee sans aucune depense" },
+    { id: "nsp-7", cat: "discipline", icon: "shield", tone: "teal", name: "7 jours", desc: "7 jours d'affilee sans aucune depense" },
+    { id: "nsp-14", cat: "discipline", icon: "shield", tone: "gold", name: "14 jours", desc: "14 jours d'affilee sans aucune depense" },
+    { id: "no-out", cat: "discipline", icon: "dining", tone: "teal", name: "Semaine sobre", desc: "Une semaine complete sans Going out" },
+    // — FINANCE —
+    { id: "goal-1", cat: "finance", icon: "piggy", tone: "green", name: "Premier objectif", desc: "Un premier objectif cree" },
+    { id: "goal-done", cat: "finance", icon: "piggy", tone: "green", name: "Objectif atteint", desc: "Un premier objectif atteint a 100%" },
+    { id: "sav-1000", cat: "finance", icon: "piggy", tone: "green", name: "$1 000 epargnes", desc: "$1 000 sur le compte epargne" },
+    { id: "sav-5000", cat: "finance", icon: "piggy", tone: "green", name: "$5 000 epargnes", desc: "$5 000 sur le compte epargne" },
+    { id: "sav-10000", cat: "finance", icon: "piggy", tone: "gold", name: "$10 000 epargnes", desc: "$10 000 sur le compte epargne" },
+    { id: "sav-25000", cat: "finance", icon: "piggy", tone: "gold", name: "$25 000 epargnes", desc: "$25 000 sur le compte epargne" },
+    { id: "sav-50000", cat: "finance", icon: "piggy", tone: "gold", name: "$50 000 epargnes", desc: "$50 000 sur le compte epargne" },
+    { id: "sav-100000", cat: "finance", icon: "crown", tone: "gold", name: "$100 000 epargnes", desc: "$100 000 sur le compte epargne" },
+    { id: "cmt-1", cat: "finance", icon: "card", tone: "blue", name: "Premier engagement", desc: "Un premier commitment cree" },
+    { id: "cmt-done-1", cat: "finance", icon: "card", tone: "blue", name: "Engagement tenu", desc: "Un premier commitment mene a son terme" },
+    { id: "cmt-done-5", cat: "finance", icon: "card", tone: "blue", name: "5 engagements", desc: "Cinq commitments menes a leur terme" },
+    { id: "cmt-done-10", cat: "finance", icon: "card", tone: "gold", name: "10 engagements", desc: "Dix commitments menes a leur terme" },
+    { id: "run-4", cat: "finance", icon: "shield", tone: "green", name: "1 mois d'avance", desc: "Runway au-dessus de 4 semaines" },
+    { id: "run-8", cat: "finance", icon: "shield", tone: "gold", name: "2 mois d'avance", desc: "Runway au-dessus de 8 semaines" },
+    { id: "run-12", cat: "finance", icon: "shield", tone: "gold", name: "3 mois d'avance", desc: "Runway au-dessus de 12 semaines" },
+    { id: "ato-covered", cat: "finance", icon: "doc", tone: "gold", name: "Impot provisionne", desc: "L'epargne couvre la dette fiscale en cours" },
+    { id: "mo-positive", cat: "finance", icon: "trend", tone: "green", name: "Mois positif", desc: "Un premier mois ou les revenus depassent les depenses" },
 ];
 const badgeState = memoCalc("badgeState", function (data) {
-    const S = weeklySeries(data), need = weeklyEarnNeed(data).total;
-    const maxUb = Math.max(0, ...S.map((w) => w.ubGross));
-    const maxInc = Math.max(0, ...S.map((w) => w.income));
-    const hrs = S.reduce((s, w) => s + w.ubHours + w.empHours, 0);
-    let run = 0, bestRun = 0;
-    for (const w of S) { run = w.income >= need ? run + 1 : 0; bestRun = Math.max(bestRun, run); }
-    const commitDone = ((data.commitments && data.commitments.projects) || []).some((p) => p.done);
+    const S = weeklySeries(data);
+    const ub = (data.uber || []).filter((u) => (u.type || "uber") === "uber");
+    const ubH = ub.reduce((s, u) => s + num(u.hours), 0);
+    const ubKm = ub.reduce((s, u) => s + num(u.km), 0);
+    // Un shift de moins de 2 h donnerait un $/h absurde sur une seule course.
+    const bestPh = Math.max(0, ...ub.filter((u) => num(u.hours) >= 2).map((u) => num(u.gross) / num(u.hours)));
+    const maxWk = Math.max(0, ...S.map((w) => w.income));
+    const mo = {};
+    (data.income || []).forEach((i) => { if (i.kind === "income") {
+        const k = (i.date || "").slice(0, 7);
+        if (k)
+            mo[k] = (mo[k] || 0) + num(i.amount);
+    } });
+    const maxMo = Math.max(0, ...Object.values(mo));
+    const maxHrs = Math.max(0, ...S.map((w) => w.ubHours + w.empHours));
+    // Jours travailles distincts par semaine, et sources distinctes.
+    let full7 = false, threeSrc = false;
+    for (const w of S) {
+        const dys = new Set(), src = new Set();
+        for (const u of ub)
+            if (weekKeyOf(u.date) === w.week) { dys.add(u.date); src.add("uber"); }
+        for (const t of data.timesheets || [])
+            if (weekKeyOf(t.date || t.weekStart) === w.week) { dys.add(t.date); src.add(t.profileId || t.employer || "emp"); }
+        if (dys.size >= 7) full7 = true;
+        if (src.size >= 3) threeSrc = true;
+    }
+    // Plus longue serie de jours sans aucune depense.
+    const spent = new Set((data.spend || []).map((s) => s.date));
+    const firstDay = [...(data.spend || []).map((s) => s.date), ...(data.income || []).map((i) => i.date)].filter(Boolean).sort()[0] || todayKey();
+    let noSpend = 0, run = 0;
+    for (let t = new Date(firstDay + "T00:00:00"); t <= new Date(todayKey() + "T00:00:00"); t = new Date(+t + DAY_MS)) {
+        run = spent.has(t.toISOString().slice(0, 10)) ? 0 : run + 1;
+        noSpend = Math.max(noSpend, run);
+    }
+    const soberWeek = S.some((w) => w.spend > 0 && !(data.spend || []).some((s) => weekKeyOf(s.date) === w.week && s.cat === "Going out"));
+    const acc = computeAccounts(data);
+    const projects = (data.commitments && data.commitments.projects) || [];
+    const cmtDone = projects.filter((p) => p.done).length;
     const goalDone = (data.goals || []).some((g) => num(g.saved) >= num(g.target) && num(g.target) > 0);
+    const rw = runway(data).weeks || 0;
+    const td = taxDebtStatus(data);
+    const moPos = Object.entries(mo).some(([k, v]) => v > (data.spend || []).filter((s) => (s.date || "").slice(0, 7) === k).reduce((s, x) => s + num(x.amount), 0));
     const hit = {
-        "uber-wk-250": maxUb >= 250, "uber-wk-500": maxUb >= 500, "uber-wk-750": maxUb >= 750, "uber-wk-1000": maxUb >= 1000,
-        "inc-wk-1500": maxInc >= 1500, "inc-wk-2000": maxInc >= 2000, "inc-wk-2500": maxInc >= 2500,
-        "streak-4": bestRun >= 4, "streak-8": bestRun >= 8, "streak-12": bestRun >= 12, "streak-26": bestRun >= 26,
-        "hrs-100": hrs >= 100, "hrs-500": hrs >= 500, "hrs-1000": hrs >= 1000,
-        "tracked-12": S.length >= 12, "tracked-26": S.length >= 26, "tracked-52": S.length >= 52,
-        "commit-done": commitDone, "goal-done": goalDone,
+        "ub-h-100": ubH >= 100, "ub-h-500": ubH >= 500, "ub-h-1000": ubH >= 1000, "ub-h-5000": ubH >= 5000,
+        "ub-km-1000": ubKm >= 1000, "ub-km-5000": ubKm >= 5000, "ub-km-10000": ubKm >= 10000, "ub-km-25000": ubKm >= 25000,
+        "ub-ph-40": bestPh >= 40, "ub-ph-50": bestPh >= 50, "ub-ph-60": bestPh >= 60, "ub-ph-75": bestPh >= 75,
+        "wk-1000": maxWk >= 1000, "wk-2500": maxWk >= 2500, "wk-5000": maxWk >= 5000,
+        "mo-5000": maxMo >= 5000, "mo-7500": maxMo >= 7500, "mo-10000": maxMo >= 10000, "mo-15000": maxMo >= 15000, "mo-20000": maxMo >= 20000,
+        "hr-40": maxHrs >= 40, "hr-50": maxHrs >= 50, "hr-60": maxHrs >= 60, "wk-7-7": full7, "three-src": threeSrc,
+        "nsp-3": noSpend >= 3, "nsp-7": noSpend >= 7, "nsp-14": noSpend >= 14, "no-out": soberWeek,
+        "goal-1": (data.goals || []).length > 0, "goal-done": goalDone,
+        "sav-1000": acc.savings >= 1000, "sav-5000": acc.savings >= 5000, "sav-10000": acc.savings >= 10000,
+        "sav-25000": acc.savings >= 25000, "sav-50000": acc.savings >= 50000, "sav-100000": acc.savings >= 100000,
+        "cmt-1": projects.length > 0, "cmt-done-1": cmtDone >= 1, "cmt-done-5": cmtDone >= 5, "cmt-done-10": cmtDone >= 10,
+        "run-4": rw >= 4, "run-8": rw >= 8, "run-12": rw >= 12,
+        "ato-covered": td.stock > 0 && acc.savings >= td.stock,
+        "mo-positive": moPos,
     };
     const saved = data.badges || {};
     const list = BADGE_DEFS.map((b) => ({ ...b, earned: !!(saved[b.id] || hit[b.id]), on: saved[b.id] ? saved[b.id].date : null }));
     const newly = BADGE_DEFS.filter((b) => hit[b.id] && !saved[b.id]).map((b) => b.id);
-    return { list, newly, earnedCount: list.filter((b) => b.earned).length, total: BADGE_DEFS.length, bestRun, maxUb, maxInc, hours: hrs, weeks: S.length };
+    return { list, newly, earnedCount: list.filter((b) => b.earned).length, total: BADGE_DEFS.length, ubH, ubKm, bestPh, maxWk, maxMo, maxHrs, noSpend };
 });
-// Alertes : deliberement SEPAREES des badges. Une medaille et un
-// avertissement dans la meme liste, ca brouille les deux.
 const alertState = memoCalc("alertState", function (data) {
     const out = [];
     const S = weeklySeries(data);
@@ -3405,7 +3482,7 @@ function Plan({ data, update, onCelebrate }) {
                         React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, color: col } }, a.title),
                         React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 3, lineHeight: 1.45 } }, a.body)));
                 })),
-                panel === "badges" && React.createElement("div", { style: { marginTop: 10 } }, [["uber", "Uber"], ["income", "Revenus"], ["streak", "Series"], ["volume", "Volume"], ["milestone", "Jalons"]].map(([ck, cl]) => {
+                panel === "badges" && React.createElement("div", { style: { marginTop: 10 } }, [["uber", "Uber"], ["income", "Revenus"], ["work", "Travail"], ["discipline", "Discipline"], ["finance", "Finance"]].map(([ck, cl]) => {
                     const items = bs.list.filter((b) => b.cat === ck);
                     if (!items.length)
                         return null;
