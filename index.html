@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v19.1";
+const APP_VERSION = "v20.3";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -1690,6 +1690,146 @@ const BADGE_DEFS = [
     { id: "ato-covered", cat: "finance", icon: "doc", tone: "gold", name: "Impot provisionne", desc: "L'epargne couvre la dette fiscale en cours" },
     { id: "mo-positive", cat: "finance", icon: "trend", tone: "green", name: "Mois positif", desc: "Un premier mois ou les revenus depassent les depenses" },
 ];
+// V20 — Rejeu chronologique de TOUT l'historique. Deux sorties :
+//  - la date exacte a laquelle chaque palier a ete franchi, au lieu du jour
+//    du deploiement (tout tombait au 10 septembre, ce qui ne voulait rien dire) ;
+//  - l'historique des DEPASSEMENTS : chaque fois qu'une valeur bat le maximum
+//    precedent, avec le contexte de ce record. Forge ne gardait que le maximum
+//    courant, donc cette suite n'existait nulle part et doit etre reconstruite.
+const recordHistory = memoCalc("recordHistory", function (data) {
+    const ub = (data.uber || []).filter((u) => (u.type || "uber") === "uber" && u.date).slice().sort((a, b) => a.date < b.date ? -1 : 1);
+    const ts = (data.timesheets || []).filter((t) => t.v === 2 && (t.date || t.weekStart)).slice().sort((a, b) => (a.date || a.weekStart) < (b.date || b.weekStart) ? -1 : 1);
+    // Agregation par periode, en distinguant les sources : les records Uber
+    // ne doivent pas etre gonfles par l'emploi, et inversement.
+    const bucket = (keyOf) => {
+        const m = {};
+        const get = (k) => (m[k] || (m[k] = { key: k, income: 0, tfn: 0, abn: 0, hours: 0, ubGross: 0, ubHours: 0, ubKm: 0, ubTrips: 0, empGross: 0, empHours: 0 }));
+        for (const i of data.income || [])
+            if (i.kind === "income" && i.date) {
+                const r = get(keyOf(i.date));
+                r.income += num(i.amount);
+                r[i.taxSource === "abn" ? "abn" : "tfn"] += num(i.amount);
+            }
+        for (const u of ub) { const r = get(keyOf(u.date)); r.ubGross += num(u.gross); r.ubHours += num(u.hours); r.ubKm += num(u.km); r.ubTrips += num(u.trips); r.hours += num(u.hours); }
+        for (const t of ts) { const r = get(keyOf(t.date || t.weekStart)); r.empGross += num(t.gross); r.empHours += num(t.hours); r.hours += num(t.hours); }
+        return Object.values(m).sort((a, b) => a.key < b.key ? -1 : 1);
+    };
+    const D = bucket((d) => String(d).slice(0, 10)), W = bucket((d) => weekKeyOf(d)), M = bucket((d) => String(d).slice(0, 7));
+    // Pour chaque record : le classement par valeur (top 10), l'historique des
+    // depassements, et deux mesures de progression.
+    const build = (rows, valOf, ctxOf, unit) => {
+        const items = rows.map((r) => ({ value: valOf(r), ...ctxOf(r) })).filter((x) => x.value > 0);
+        const top = items.slice().sort((a, b) => b.value - a.value).slice(0, 10).map((x, k) => ({ ...x, rank: k + 1 }));
+        let b = 0;
+        const hist = [];
+        for (const x of items)
+            if (x.value > b) { hist.push({ ...x, prev: b }); b = x.value; }
+        const gaps = [];
+        for (let k = 1; k < hist.length; k++)
+            gaps.push(hist[k].value - hist[k - 1].value);
+        return { unit, best: top[0] || null, top, history: hist.slice().reverse(), count: items.length, records: hist.length,
+            // "+X% depuis le 10e" : lisible seulement si le classement est plein.
+            spanPct: top.length >= 2 && top[top.length - 1].value > 0 ? ((top[0].value - top[top.length - 1].value) / top[top.length - 1].value) * 100 : null,
+            spanAbs: top.length >= 2 ? top[0].value - top[top.length - 1].value : null,
+            avgGap: gaps.length ? gaps.reduce((s, g) => s + g, 0) / gaps.length : null };
+    };
+    const shiftCtx = (u) => ({ date: u.date, source: "Uber", gross: num(u.gross), hours: num(u.hours), km: num(u.km), trips: num(u.trips) });
+    const empCtx = (t) => ({ date: t.date || t.weekStart, source: (t.employer || "").trim(), gross: num(t.gross), hours: num(t.hours) });
+    const perCtx = (r) => ({ date: r.key, income: r.income, tfn: r.tfn, abn: r.abn, hours: r.hours, ubGross: r.ubGross, ubHours: r.ubHours, ubKm: r.ubKm, ubTrips: r.ubTrips, empGross: r.empGross, empHours: r.empHours });
+    return {
+        // — UBER —  (le filtre 2 h evite qu'une course isolee fasse un $/h absurde)
+        uberRate: build(ub.filter((u) => num(u.hours) >= 2), (u) => num(u.gross) / num(u.hours), shiftCtx, "rate"),
+        uberSession: build(ub, (u) => num(u.hours), shiftCtx, "hours"),
+        uberDayTrips: build(D, (r) => r.ubTrips, perCtx, "trips"),
+        uberShiftTrips: build(ub, (u) => num(u.trips), shiftCtx, "trips"),
+        uberDayKm: build(D, (r) => r.ubKm, perCtx, "km"),
+        uberDay: build(D, (r) => r.ubGross, perCtx, "money"),
+        uberWeek: build(W, (r) => r.ubGross, perCtx, "money"),
+        uberMonth: build(M, (r) => r.ubGross, perCtx, "money"),
+        uberWeekHours: build(W, (r) => r.ubHours, perCtx, "hours"),
+        uberMonthHours: build(M, (r) => r.ubHours, perCtx, "hours"),
+        // — REVENUS, toutes sources —
+        dayIncome: build(D, (r) => r.income, perCtx, "money"),
+        weekIncome: build(W, (r) => r.income, perCtx, "money"),
+        monthIncome: build(M, (r) => r.income, perCtx, "money"),
+        // — TRAVAIL, emploi seul. Les fiches du semis ont un brut mais 0 h :
+        //   elles ecrasaient le record avec 1 662.50 pour zero heure.
+        empRate: build(ts.filter((t) => num(t.hours) >= 2), (t) => num(t.gross) / num(t.hours), empCtx, "rate"),
+        empShift: build(ts.filter((t) => num(t.hours) > 0), (t) => num(t.gross), empCtx, "money"),
+        empWeek: build(W, (r) => r.empGross, perCtx, "money"),
+        empMonth: build(M, (r) => r.empGross, perCtx, "money"),
+        empDayHours: build(D, (r) => r.empHours, perCtx, "hours"),
+        empWeekHours: build(W, (r) => r.empHours, perCtx, "hours"),
+        weekHours: build(W, (r) => r.hours, perCtx, "hours"),
+        monthHours: build(M, (r) => r.hours, perCtx, "hours"),
+    };
+});
+// Date reelle a laquelle chaque palier a ete franchi, reconstruite depuis
+// l'historique complet. Ne couvre pas l'epargne ni le Runway : Forge ne garde
+// que le solde courant et le besoin hebdo courant, il n'y a pas d'historique.
+const badgeEarnedDates = memoCalc("badgeEarnedDates", function (data) {
+    const on = {};
+    const mark = (id, d) => { if (d && !on[id]) on[id] = d; };
+    const ub = (data.uber || []).filter((u) => (u.type || "uber") === "uber" && u.date).slice().sort((a, b) => a.date < b.date ? -1 : 1);
+    let hrs = 0, km = 0;
+    for (const u of ub) {
+        hrs += num(u.hours);
+        km += num(u.km);
+        for (const [t, id] of [[100, "ub-h-100"], [500, "ub-h-500"], [1000, "ub-h-1000"], [5000, "ub-h-5000"]])
+            if (hrs >= t) mark(id, u.date);
+        for (const [t, id] of [[1000, "ub-km-1000"], [5000, "ub-km-5000"], [10000, "ub-km-10000"], [25000, "ub-km-25000"]])
+            if (km >= t) mark(id, u.date);
+    }
+    for (const r of recordHistory(data).uberRate.history.slice().reverse())
+        for (const [t, id] of [[40, "ub-ph-40"], [50, "ub-ph-50"], [60, "ub-ph-60"], [75, "ub-ph-75"]])
+            if (r.value >= t) mark(id, r.date);
+    const rh = recordHistory(data);
+    for (const r of rh.weekIncome.history.slice().reverse())
+        for (const [t, id] of [[1000, "wk-1000"], [2500, "wk-2500"], [5000, "wk-5000"]])
+            if (r.value >= t) mark(id, r.date);
+    for (const r of rh.monthIncome.history.slice().reverse())
+        for (const [t, id] of [[5000, "mo-5000"], [7500, "mo-7500"], [10000, "mo-10000"], [15000, "mo-15000"], [20000, "mo-20000"]])
+            if (r.value >= t) mark(id, r.date + "-01");
+    for (const r of rh.weekHours.history.slice().reverse())
+        for (const [t, id] of [[40, "hr-40"], [50, "hr-50"], [60, "hr-60"]])
+            if (r.value >= t) mark(id, r.date);
+    // Semaine 7/7 et trois sources : premiere semaine ou la condition tient.
+    const wk = {};
+    for (const u of ub) { const k = weekKeyOf(u.date); (wk[k] || (wk[k] = { days: new Set(), src: new Set() })); wk[k].days.add(u.date); wk[k].src.add("uber"); }
+    for (const t of data.timesheets || []) { const k = weekKeyOf(t.date || t.weekStart); if (!k) continue; (wk[k] || (wk[k] = { days: new Set(), src: new Set() })); wk[k].days.add(t.date); wk[k].src.add(t.profileId || t.employer || "emp"); }
+    for (const k of Object.keys(wk).sort()) {
+        if (wk[k].days.size >= 7) mark("wk-7-7", k);
+        if (wk[k].src.size >= 3) mark("three-src", k);
+    }
+    // Semaine sans Going out : premiere semaine avec des depenses mais aucune
+    // dans cette categorie. Une semaine vide ne compte pas comme sobre.
+    const wsp = {};
+    for (const s of data.spend || []) { const k = weekKeyOf(s.date); if (!k) continue; (wsp[k] || (wsp[k] = { n: 0, out: 0 })); wsp[k].n++; if (s.cat === "Going out") wsp[k].out++; }
+    for (const k of Object.keys(wsp).sort())
+        if (wsp[k].n > 0 && wsp[k].out === 0) mark("no-out", k);
+    // Series de jours sans depense : on marque le jour ou la serie atteint N.
+    const spent = new Set((data.spend || []).map((s) => s.date));
+    const dates = [...(data.spend || []).map((s) => s.date), ...(data.income || []).map((i) => i.date)].filter(Boolean).sort();
+    if (dates.length) {
+        let run = 0;
+        for (let t = new Date(dates[0] + "T00:00:00"); t <= new Date(todayKey() + "T00:00:00"); t = new Date(+t + DAY_MS)) {
+            const k = t.toISOString().slice(0, 10);
+            run = spent.has(k) ? 0 : run + 1;
+            for (const [n, id] of [[3, "nsp-3"], [7, "nsp-7"], [14, "nsp-14"]])
+                if (run >= n) mark(id, k);
+        }
+    }
+    // Premier mois ou les revenus depassent les depenses.
+    const mi = {}, ms = {};
+    for (const i of data.income || []) if (i.kind === "income" && i.date) mi[i.date.slice(0, 7)] = (mi[i.date.slice(0, 7)] || 0) + num(i.amount);
+    for (const s of data.spend || []) if (s.date) ms[s.date.slice(0, 7)] = (ms[s.date.slice(0, 7)] || 0) + num(s.amount);
+    for (const k of Object.keys(mi).sort())
+        if (mi[k] > (ms[k] || 0)) mark("mo-positive", k + "-01");
+    // Creation du premier commitment : la date est stockee sur le projet.
+    const created = ((data.commitments && data.commitments.projects) || []).map((p) => p.createdAt).filter(Boolean).sort();
+    if (created.length) mark("cmt-1", created[0]);
+    return on;
+});
 const badgeState = memoCalc("badgeState", function (data) {
     const S = weeklySeries(data);
     const ub = (data.uber || []).filter((u) => (u.type || "uber") === "uber");
@@ -1750,9 +1890,41 @@ const badgeState = memoCalc("badgeState", function (data) {
         "mo-positive": moPos,
     };
     const saved = data.badges || {};
-    const list = BADGE_DEFS.map((b) => ({ ...b, earned: !!(saved[b.id] || hit[b.id]), on: saved[b.id] ? saved[b.id].date : null }));
+    // V20 — la date affichee est celle du franchissement reel, reconstruite
+    // depuis l'historique complet. `saved[id].date` est la date de constat :
+    // au deploiement elle vaut aujourd'hui pour tout le monde, ce qui ne veut
+    // rien dire. On ne s'en sert qu'a defaut, pour les paliers sans historique
+    // reconstituable (epargne, runway).
+    const real = badgeEarnedDates(data);
+    const list = BADGE_DEFS.map((b) => ({ ...b, earned: !!(saved[b.id] || hit[b.id]), on: real[b.id] || (saved[b.id] ? saved[b.id].date : null), dated: !!real[b.id] }));
     const newly = BADGE_DEFS.filter((b) => hit[b.id] && !saved[b.id]).map((b) => b.id);
-    return { list, newly, earnedCount: list.filter((b) => b.earned).length, total: BADGE_DEFS.length, ubH, ubKm, bestPh, maxWk, maxMo, maxHrs, noSpend };
+    // Record absolu par famille, avec son contexte, pour l'entete de chaque
+    // section. Le detail (historique des depassements) vit dans recordHistory.
+    const rh = recordHistory(data);
+    const R = (key, label, sub) => ({ key, label, sub, ...rh[key] });
+    const records = {
+        uber: [R("uberRate", "Meilleur $/h", "Shifts de 2 h minimum"),
+            R("uberDay", "Plus grosse journee", "Brut Uber sur une journee"),
+            R("uberWeek", "Plus grosse semaine", "Brut Uber sur une semaine"),
+            R("uberMonth", "Plus gros mois", "Brut Uber sur un mois"),
+            R("uberSession", "Plus longue session", "Heures sur un seul shift"),
+            R("uberDayKm", "Plus de kilometres", "Sur une journee"),
+            R("uberDayTrips", "Plus de courses (journee)", "Nombre de courses"),
+            R("uberShiftTrips", "Plus de courses (shift)", "Nombre de courses"),
+            R("uberWeekHours", "Plus d'heures (semaine)", "Heures de conduite"),
+            R("uberMonthHours", "Plus d'heures (mois)", "Heures de conduite")],
+        income: [R("dayIncome", "Meilleure journee", "Tous jobs confondus"),
+            R("weekIncome", "Meilleure semaine", "Tous jobs confondus"),
+            R("monthIncome", "Meilleur mois", "Tous jobs confondus")],
+        work: [R("empShift", "Plus gros shift", "Emploi"),
+            R("empRate", "Meilleur taux horaire", "Emploi, shifts de 2 h minimum"),
+            R("empWeek", "Plus grosse semaine", "Emploi seul"),
+            R("empMonth", "Plus gros mois", "Emploi seul"),
+            R("empDayHours", "Plus longue journee", "Heures d'emploi sur une journee"),
+            R("empWeekHours", "Plus longue semaine", "Heures d'emploi sur une semaine")],
+        discipline: [], finance: [],
+    };
+    return { list, newly, earnedCount: list.filter((b) => b.earned).length, total: BADGE_DEFS.length, records, ubH, ubKm, bestPh, maxWk, maxMo, maxHrs, noSpend };
 });
 const alertState = memoCalc("alertState", function (data) {
     const out = [];
@@ -3536,10 +3708,11 @@ function Tax({ data, update, openWork, openHistory, setTab }) {
         }
         const rate = currentSetAsideRate(data);
         const tax = Number(gross) * rate;
-        update((d) => { (d.uber || (d.uber = [])).unshift({ id: uid(), date, ts: nowTs(), type: shiftType, gross: Number(gross), km: Number(km) || 0, cons: Number(cons) || 0, hours: Number(hours) || 0, taxRate: currentSetAsideRate(d) }); });
+        update((d) => { (d.uber || (d.uber = [])).unshift({ id: uid(), date, ts: nowTs(), type: shiftType, gross: Number(gross), trips: Number(trips) || 0, km: Number(km) || 0, cons: Number(cons) || 0, hours: Number(hours) || 0, taxRate: currentSetAsideRate(d) }); });
         setLogMsg(`✓ Shift logged · ${Math.round(rate * 100)}% tax set aside (${fmt(tax)})`);
         setTimeout(() => setLogMsg(null), 4000);
         setGross("");
+        setTrips("");
         setKm("");
         setCons("");
         setHours("");
@@ -4824,6 +4997,7 @@ function TxEditor({ t, buf, setBuf, cats, onSave, onDel }) {
         src === "uber" && (React.createElement(React.Fragment, null,
             React.createElement(DateField, { label: "Date", value: buf.date || "", onChange: (v) => set("date", v) }),
             React.createElement(Field, { label: "Gross", value: buf.gross ?? "", onChange: (v) => set("gross", v), numeric: true, prefix: CURRENCY }),
+            React.createElement(Field, { label: "Trips", value: buf.trips ?? "", onChange: (v) => set("trips", v), numeric: true }),
             React.createElement(Field, { label: "Km", value: buf.km ?? "", onChange: (v) => set("km", v), numeric: true }),
             React.createElement(Field, { label: "Consumption (L/100km)", value: buf.cons ?? "", onChange: (v) => set("cons", v), numeric: true }),
             React.createElement(Field, { label: "Hours", value: buf.hours ?? "", onChange: (v) => set("hours", v), numeric: true }),
@@ -4876,6 +5050,9 @@ function WorkSessionForm({ data, update, showToast, onClose }) {
     const [hoursStr, setHoursStr] = useState("");
     const [revenue, setRevenue] = useState("");
     const [km, setKm] = useState("");
+    // V20.3 — nombre de courses par shift. Sans lui, aucun record ni statistique
+    // par course n'etait calculable : Forge ne connaissait que des sessions.
+    const [trips, setTrips] = useState("");
     const [cons, setCons] = useState("");
     const [fuelPaid, setFuelPaid] = useState("");
     const dupLast = () => { const last = (data.uber || []).find((u) => (u.type || "uber") === "uber"); if (!last)
@@ -4981,6 +5158,8 @@ function WorkSessionForm({ data, update, showToast, onClose }) {
                     React.createElement(FInput, { value: hoursStr, onChange: setHoursStr, placeholder: "4.5", numeric: true }),
                     React.createElement(FLabel, null, "Uber revenue (gross)"),
                     React.createElement(FAmount, { value: revenue, onChange: setRevenue }),
+                    React.createElement(FLabel, null, "Trips (optional)"),
+                    React.createElement(FInput, { value: trips, onChange: setTrips, placeholder: "12", numeric: true }),
                     React.createElement(FLabel, null, "Kilometres (optional)"),
                     React.createElement(FInput, { value: km, onChange: setKm, placeholder: "120 km", numeric: true }),
                     React.createElement(FLabel, null, "Consumption L/100km (optional)"),
