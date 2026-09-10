@@ -101,7 +101,7 @@ function pushSnapshot(data) {
     }
 }
 const LOCALE = "en-AU";
-const APP_VERSION = "v19.0";
+const APP_VERSION = "v19.1";
 // ── seed ─────────────────────────────────────────────────────
 const seed = () => ({
     meta: { name: "", started: new Date().toISOString() },
@@ -481,7 +481,11 @@ function App() {
         update((d) => { d.badges = d.badges || {}; bs.newly.forEach((id) => { if (!d.badges[id]) d.badges[id] = { date: todayKey() }; }); });
         const first = BADGE_DEFS.find((b) => b.id === bs.newly[0]);
         if (first)
+            // V19.1 — il manquait la fermeture : le bandeau restait affiche
+            // indefiniment, sur toutes les pages. L'autre declencheur, lui,
+            // programmait bien sa disparition a 6 s.
             setRecordFlash({ title: "Badge \u00B7 " + first.name });
+            setTimeout(() => setRecordFlash(null), 6000);
     }, [data?.income, data?.uber, data?.spend, data?.timesheets, data?.goals, data?.commitments]); // eslint-disable-line
     useEffect(() => {
         if (!data)
@@ -3460,28 +3464,17 @@ function Plan({ data, update, onCelebrate }) {
                         React.createElement(FAction, { tone: "green", onClick: () => { add(); setGoalOpen(false); } }, "Add goal"))))));
         })(),
         (() => {
-            // V17.3 — alertes et badges etaient deux longues sections deroulees
-            // en permanence : 4 encarts plus 19 tuiles sous les commitments.
-            // Elles passent sous une banniere compacte, depliable au tap.
-            // La page ne montre plus que goals et commitments par defaut.
-            const al = alertState(data), bs = badgeState(data);
-            if (!al.length && !bs.total)
+            // V19.1 — la banniere Attention/Badges du bas fait doublon avec la
+            // cloche de l'en-tete depuis la v18.1. Il ne reste que l'acces aux
+            // badges, qui n'ont pas d'autre point d'entree.
+            const bs = badgeState(data);
+            if (!bs.total)
                 return null;
-            const warn = al.some((a) => a.tone === "red") ? C.red : C.gold;
-            const pill = (key, col, icon, label, count) => React.createElement("button", { key: key, onClick: () => setPanel(panel === key ? null : key), style: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 8px", borderRadius: 14, border: `1px solid ${panel === key ? col : col + "3d"}`, background: panel === key ? `${col}1f` : `${col}0d`, color: col, fontSize: 13, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", minWidth: 0 } },
-                React.createElement(Icon, { name: icon, size: 15, color: col }),
-                React.createElement("span", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, label),
-                React.createElement("span", { style: { fontWeight: 800, opacity: 0.75 } }, count));
             return (React.createElement("div", { style: { marginTop: 4 } },
-                React.createElement("div", { style: { display: "flex", gap: 9 } },
-                    al.length > 0 && pill("alerts", warn, "bell", "Attention", alertCount(data) || al.length),
-                    bs.total > 0 && pill("badges", C.green, "crown", "Badges", bs.earnedCount + "/" + bs.total)),
-                panel === "alerts" && React.createElement("div", { style: { marginTop: 10 } }, al.map((a) => {
-                    const col = a.tone === "red" ? C.red : C.gold;
-                    return (React.createElement("div", { key: a.id, style: { background: `${col}0d`, border: `1px solid ${col}3d`, borderRadius: 14, padding: 13, marginBottom: 9 } },
-                        React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, color: col } }, a.title),
-                        React.createElement("div", { style: { fontSize: 12.5, color: C.textDim, marginTop: 3, lineHeight: 1.45 } }, a.body)));
-                })),
+                React.createElement("button", { onClick: () => setPanel(panel === "badges" ? null : "badges"), style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 8px", borderRadius: 14, border: `1px solid ${panel === "badges" ? C.green : C.green + "3d"}`, background: panel === "badges" ? `${C.green}1f` : `${C.green}0d`, color: C.green, fontSize: 13, fontWeight: 700, fontFamily: "inherit", cursor: "pointer" } },
+                    React.createElement(Icon, { name: "crown", size: 15, color: C.green }),
+                    React.createElement("span", null, "Badges"),
+                    React.createElement("span", { style: { fontWeight: 800, opacity: 0.75 } }, bs.earnedCount + "/" + bs.total)),
                 panel === "badges" && React.createElement("div", { style: { marginTop: 10 } }, [["uber", "Uber"], ["income", "Revenus"], ["work", "Travail"], ["discipline", "Discipline"], ["finance", "Finance"]].map(([ck, cl]) => {
                     const items = bs.list.filter((b) => b.cat === ck);
                     if (!items.length)
