@@ -25,12 +25,15 @@
   /* Nappes lumineuses traversantes : trois faisceaux tres diffus, inclines,
      qui donnent du mouvement au fond sans jamais devenir visibles en tant que
      formes. Purement decoratif, sous tout le contenu. */
-  body > .beams { position: fixed; inset: -20vh -30vw; pointer-events: none; z-index: -1; opacity: .85;
+  /* Le flou est dessine dans les degrades (transitions tres larges) au lieu
+     d'etre calcule par filter: blur(). Flouter une couche plus grande que
+     l'ecran forcait iOS a rasteriser un tampon enorme hors ecran a chaque
+     changement d'etat. Rendu quasi identique, cout nul. */
+  body > .beams { position: fixed; inset: 0; pointer-events: none; z-index: -1; opacity: .85;
     background:
-      linear-gradient(101deg, transparent 26%, rgba(90,180,255,.115) 40%, rgba(140,210,255,.05) 46%, transparent 55%),
-      linear-gradient(97deg, transparent 52%, rgba(59,168,255,.085) 64%, transparent 74%),
-      linear-gradient(112deg, transparent 68%, rgba(40,140,255,.06) 79%, transparent 88%);
-    filter: blur(22px); }
+      linear-gradient(101deg, transparent 16%, rgba(90,180,255,.035) 29%, rgba(120,200,255,.10) 41%, rgba(140,210,255,.045) 49%, rgba(90,180,255,.015) 59%, transparent 68%),
+      linear-gradient(97deg, transparent 42%, rgba(59,168,255,.026) 54%, rgba(59,168,255,.075) 64%, rgba(59,168,255,.022) 73%, transparent 84%),
+      linear-gradient(112deg, transparent 58%, rgba(40,140,255,.020) 70%, rgba(40,140,255,.055) 79%, rgba(40,140,255,.016) 87%, transparent 95%); }
   body { font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif; color: #F2F3F5; overscroll-behavior-y: none; -webkit-font-smoothing: antialiased; }
   ::selection { background: rgba(34,197,94,.28); }
   @keyframes fgRise { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
@@ -3019,38 +3022,65 @@ function Income({ data, update, openHistory, showToast, setTab }) {
             (() => {
                 const ms = moneyStats(data);
                 const prov = currentSetAsideRate(data);
+                // V6 — barres empilees TFN / ABN au lieu d'un cumul. Un cumul ne
+                // peut que monter : il ne dit ni QUAND l'argent est arrive, ni
+                // d'ou, ni si c'est au-dessus ou en dessous du besoin. Les
+                // barres disent les trois. La periode s'arrete aujourd'hui,
+                // plus de jours futurs traces a plat.
                 const isWeek = view === "week", isFY = view === "tax";
-                const now = new Date();
-                // V16.9 — en vue Tax year le graph couvre le 1er juillet a
-                // aujourd'hui. Un point par jour ferait ~365 points illisibles
-                // sur un ecran de telephone : on bucketise par semaine. Les
-                // deux autres vues restent au jour, elles sont assez courtes.
-                const step = isFY ? 7 : 1;
-                const start = isWeek ? new Date(curW + "T00:00:00")
-                    : isFY ? new Date(weekKeyOf(fyStartKey()) + "T00:00:00")
-                        : new Date(now.getFullYear(), now.getMonth(), 1);
-                const total = (data.income || []).filter((i) => i.kind === "income" && inPer(i, view)).reduce((s, i) => s + Number(i.amount || 0), 0);
-                const days = Math.max(2, Math.ceil((now - start) / (DAY_MS * step)) + 1);
-                const perDay = new Array(days).fill(0);
-                (data.income || []).filter((i) => i.kind === "income").forEach((i) => {
-                    const ds = i.date || i.week || "";
-                    if (!ds)
-                        return;
-                    const idx = Math.floor((new Date(ds + "T00:00:00") - start) / (DAY_MS * step));
-                    if (idx >= 0 && idx < days) {
-                        const r = Number(i.amount || 0);
-                        perDay[idx] += i.taxSource === "abn" ? r * (1 - prov) : r;
+                const today = todayKey();
+                const buckets = [];
+                // La periode entiere est tracee, y compris ce qui reste a venir :
+                // sur des barres, une colonne vide dit "il reste 2 semaines",
+                // information qu'un cumul ne pouvait pas porter.
+                if (isWeek) {
+                    for (let k = 0; k < 7; k++) {
+                        const dk = new Date(new Date(curW + "T00:00:00").getTime() + k * DAY_MS).toISOString().slice(0, 10);
+                        buckets.push({ key: dk, future: dk > today, label: new Date(dk + "T00:00:00").toLocaleDateString("en-AU", { weekday: "narrow" }), match: (ds) => ds === dk });
                     }
+                }
+                else if (isFY) {
+                    const y0 = Number(fyStartKey().slice(0, 4));
+                    for (let k = 0; k < 12; k++) {
+                        const mo = ((6 + k) % 12) + 1, yr = y0 + (6 + k >= 12 ? 1 : 0);
+                        const mk = yr + "-" + String(mo).padStart(2, "0");
+                        buckets.push({ key: mk, future: mk > today.slice(0, 7), label: new Date(mk + "-01T00:00:00").toLocaleDateString("en-AU", { month: "narrow" }), match: (ds) => ds.slice(0, 7) === mk });
+                    }
+                }
+                else {
+                    const mStart = today.slice(0, 7) + "-01";
+                    const mEnd = new Date(Number(today.slice(0, 4)), Number(today.slice(5, 7)), 0).toISOString().slice(0, 10);
+                    let w = weekKeyOf(mStart);
+                    while (w <= mEnd) {
+                        const wk0 = w;
+                        const mk0 = today.slice(0, 7);
+                        buckets.push({ key: wk0, future: wk0 > today, label: new Date(Math.max(new Date(wk0 + "T00:00:00").getTime(), new Date(mStart + "T00:00:00").getTime())).getDate() + "", match: (ds) => weekKeyOf(ds) === wk0 && ds.slice(0, 7) === mk0 });
+                        w = new Date(new Date(w + "T00:00:00").getTime() + 7 * DAY_MS).toISOString().slice(0, 10);
+                    }
+                }
+                // Brut encaisse, sans provision : la barre montre ce qui est entre.
+                const bars = buckets.map((bk) => {
+                    let t = 0, a2 = 0;
+                    for (const i of data.income || [])
+                        if (i.kind === "income") {
+                            const ds = i.date || i.week || "";
+                            if (ds && bk.match(ds)) {
+                                if (i.taxSource === "abn")
+                                    a2 += Number(i.amount || 0);
+                                else
+                                    t += Number(i.amount || 0);
+                            }
+                        }
+                    return { ...bk, tfn: t, abn: a2, total: t + a2 };
                 });
-                let run = 0;
-                const cum = perDay.map((v) => (run += v));
-                const every = isWeek ? 1 : isFY ? Math.max(1, Math.ceil(days / 6)) : 7;
-                const labels = cum.map((_, i) => {
-                    if (i % every !== 0 && i !== days - 1)
-                        return "";
-                    const d = new Date(start.getTime() + i * DAY_MS * step);
-                    return `${d.getDate()} ${d.toLocaleDateString("en-AU", { month: "short" })}`;
-                });
+                const total = (data.income || []).filter((i) => i.kind === "income" && inPer(i, view)).reduce((s, i) => s + Number(i.amount || 0), 0);
+                // Reference : le besoin hebdo en vue Semaine, la moyenne des
+                // periodes non vides ailleurs.
+                const done = bars.filter((x) => x.total > 0);
+                const refVal = isWeek ? weeklyEarnNeed(data).total
+                    : done.length ? done.reduce((s, x) => s + x.total, 0) / done.length : 0;
+                const refLbl = isWeek ? "Weekly need" : "Average";
+                const mx = Math.max(refVal, ...bars.map((x) => x.total), 1);
                 const sum = (f) => (data.income || []).filter((i) => i.kind === "income" && inPer(i, view) && f(i)).reduce((s, i) => s + Number(i.amount || 0), 0);
                 const tfn = sum((i) => i.taxSource === "tfn");
                 const abn = sum((i) => i.taxSource === "abn");
@@ -3063,7 +3093,30 @@ function Income({ data, update, openHistory, showToast, setTab }) {
                         React.createElement("div", { style: { fontSize: 34, fontWeight: 800, color: C.green, marginTop: 7, letterSpacing: -1.2, lineHeight: 1 } }, React.createElement(Num, { value: total, format: fmt })),
                         React.createElement("div", { style: { fontSize: 13, color: C.textDim, marginTop: 7 } }, isWeek ? "This week" : isFY ? "Tax year to date \u00B7 since 1 July" : "This month"),
                         React.createElement("div", { style: { marginTop: 12 } },
-                            React.createElement(AxisChart, { points: cum, labels: labels, color: C.green }))),
+                            (() => {
+                                const H = 148, PAD = 18;
+                                const w = 100 / Math.max(1, bars.length);
+                                const bw = Math.min(w * 0.76, 22);
+                                return React.createElement("div", { style: { position: "relative", height: H + 22 } },
+                                    refVal > 0 && React.createElement("div", { style: { position: "absolute", left: 0, right: 0, top: PAD + (H - PAD) * (1 - refVal / mx), borderTop: `1px dashed ${C.gold}66`, pointerEvents: "none" } },
+                                        React.createElement("span", { style: { position: "absolute", right: 0, top: -14, fontSize: 9.5, color: C.gold, whiteSpace: "nowrap" } }, refLbl + " " + fmt(refVal))),
+                                    React.createElement("div", { style: { position: "absolute", inset: `0 0 22px 0`, display: "flex", alignItems: "flex-end", justifyContent: "space-around" } }, bars.map((b) => {
+                                        // Deux colonnes cote a cote : TFN et ABN se comparent
+                                        // directement, ce qu'un empilement ne permet pas.
+                                        const hT = (H - PAD) * (b.tfn / mx), hA = (H - PAD) * (b.abn / mx);
+                                        const over = b.total >= refVal && refVal > 0;
+                                        const col = (v, h, c) => React.createElement("div", { key: c, style: { flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-end", alignItems: "center" } },
+                                            v > 0 ? React.createElement("div", { style: { width: "100%", height: Math.max(3, h), background: `linear-gradient(180deg, ${c}, ${c}99)`, borderRadius: "4px 4px 0 0" } })
+                                                : React.createElement("div", { style: { width: "100%", height: 3, background: b.future ? "rgba(255,255,255,.04)" : "rgba(255,255,255,.09)", borderRadius: 3 } }));
+                                        return React.createElement("div", { key: b.key, title: b.key + " \u00b7 " + fmt(b.total), style: { width: bw + "%", display: "flex", flexDirection: "column", justifyContent: "flex-end", alignItems: "center", opacity: b.future ? 0.45 : 1 } },
+                                            b.total > 0 && React.createElement("div", { style: { fontSize: 8.5, color: over ? C.green : C.textFaint, marginBottom: 3, whiteSpace: "nowrap" } }, b.total >= 1000 ? "$" + (b.total / 1000).toFixed(1) + "k" : "$" + Math.round(b.total)),
+                                            React.createElement("div", { style: { width: "100%", display: "flex", alignItems: "flex-end", gap: 2 } }, col(b.tfn, hT, C.blue), col(b.abn, hA, C.green)));
+                                    })),
+                                    React.createElement("div", { style: { position: "absolute", left: 0, right: 0, bottom: 0, display: "flex", justifyContent: "space-around" } }, bars.map((b) => React.createElement("div", { key: b.key, style: { width: bw + "%", textAlign: "center", fontSize: 9.5, color: C.textFaint } }, b.label))));
+                            })(),
+                            React.createElement("div", { style: { display: "flex", gap: 14, marginTop: 10, fontSize: 10.5, color: C.textFaint } },
+                                React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } }, React.createElement("span", { style: { width: 9, height: 9, borderRadius: 3, background: C.blue } }), "TFN"),
+                                React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5 } }, React.createElement("span", { style: { width: 9, height: 9, borderRadius: 3, background: C.green } }), "ABN")))),
                     React.createElement(Card, null,
                         React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: 0.7, color: C.textDim, textTransform: "uppercase", marginBottom: 2 } }, "Income sources"),
                         sources.map(([label, val, col, ic]) => {
@@ -5977,7 +6030,7 @@ const delBtn = { background: "transparent", border: "none", color: C.textFaint, 
 const chip = (col) => ({ flex: 1, padding: "9px 0", borderRadius: 12, border: `1px solid ${col}33`, background: `${col}1A`, color: col, fontWeight: 800, fontSize: 13, fontFamily: "inherit", cursor: "pointer" });
 function TabBar({ tab, setTab }) {
     const tabs = [["home", "Home", "house", C.green], ["income", "Income", "up", C.green], ["spend", "Spend", "down", C.red], ["tax", "Work", "PAIR", C.gold], ["plan", "Plan", "target", C.blue]];
-    return (React.createElement("div", { style: { position: "fixed", bottom: 0, left: 0, right: 0, background: "linear-gradient(180deg, rgba(2,8,20,.62) 0%, rgba(2,6,16,.96) 60%)", backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)", borderTop: "1px solid rgba(90,150,235,.08)", display: "flex", justifyContent: "center", paddingBottom: "env(safe-area-inset-bottom)", zIndex: 80 } },
+    return (React.createElement("div", { style: { position: "fixed", bottom: 0, left: 0, right: 0, background: "linear-gradient(180deg, rgba(3,14,32,.78) 0%, rgba(2,8,20,.96) 45%, #020817 100%)", borderTop: "1px solid rgba(90,150,235,.08)", display: "flex", justifyContent: "center", paddingBottom: "env(safe-area-inset-bottom)", zIndex: 80 } },
         React.createElement("div", { style: { display: "flex", width: "100%", maxWidth: 480 } }, tabs.map(([id, label, icon, accent]) => {
             const on = tab === id || (id === "home" && (tab === "settings" || tab === "trends"));
 const col = on ? "#6FB2FF" : "#61748E";
