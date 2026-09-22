@@ -2296,7 +2296,7 @@ function Home({ data, update, setTab, openHistory, openWork }) {
     // deux pavés d'action. La v23.0 reste disponible sous HomeClassic.
     const rw = runway(data);
     const pct = Math.max(0, Math.min(1, (rw.weeks == null ? 0 : rw.weeks) / 4));
-    const R = 88, CIRC = 2 * Math.PI * R, uid = "gg" + Math.round(pct * 1000);
+    const R = 88, CIRC = 2 * Math.PI * R, gid = "gg" + Math.round(pct * 1000);
     const dotCol = sts.status === "critical" ? C.red : sts.status === "tight" ? C.gold : "#34D07F";
     const runCol = rw.status === "red" ? "#FF5A5A" : rw.status === "orange" ? C.gold : "#34D07F";
     const N = 22, GAP = 6, SEG = CIRC / N - GAP;
@@ -2325,22 +2325,22 @@ function Home({ data, update, setTab, openHistory, openWork }) {
                 React.createElement("div", { style: { position: "relative", width: "100%", maxWidth: 366, margin: "6px auto 0", aspectRatio: "1 / 1" } },
                     React.createElement("div", { dangerouslySetInnerHTML: { __html: `<svg viewBox="0 0 240 240" style="position:absolute;inset:0;width:100%;height:100%;overflow:visible">
 <defs>
-<mask id="${uid}m"><circle cx="120" cy="120" r="${R}" fill="none" stroke="#fff" stroke-width="17" stroke-dasharray="${SEG.toFixed(2)} ${GAP}" transform="rotate(-90 120 120)"/></mask>
-<linearGradient id="${uid}a" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#1560FF"/><stop offset=".42" stop-color="#4FB6FF"/><stop offset="1" stop-color="#DCF3FF"/></linearGradient>
-<radialGradient id="${uid}c" cx="50%" cy="34%" r="82%"><stop offset="0" stop-color="#041028"/><stop offset=".42" stop-color="#010713"/><stop offset=".8" stop-color="#000308"/><stop offset="1" stop-color="#000104"/></radialGradient>
-<linearGradient id="${uid}l" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#DCF3FF" stop-opacity=".30"/><stop offset=".5" stop-color="#DCF3FF" stop-opacity="0"/></linearGradient>
-<filter id="${uid}b" x="-90%" y="-90%" width="280%" height="280%"><feGaussianBlur stdDeviation="7"/></filter>
-<filter id="${uid}b2" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="16"/></filter>
-<radialGradient id="${uid}h" cx="50%" cy="50%" r="50%"><stop offset=".55" stop-color="#3BA8FF" stop-opacity="0"/><stop offset=".86" stop-color="#4FB6FF" stop-opacity=".56"/><stop offset="1" stop-color="#3BA8FF" stop-opacity="0"/></radialGradient>
+<mask id="${gid}m"><circle cx="120" cy="120" r="${R}" fill="none" stroke="#fff" stroke-width="17" stroke-dasharray="${SEG.toFixed(2)} ${GAP}" transform="rotate(-90 120 120)"/></mask>
+<linearGradient id="${gid}a" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#1560FF"/><stop offset=".42" stop-color="#4FB6FF"/><stop offset="1" stop-color="#DCF3FF"/></linearGradient>
+<radialGradient id="${gid}c" cx="50%" cy="34%" r="82%"><stop offset="0" stop-color="#041028"/><stop offset=".42" stop-color="#010713"/><stop offset=".8" stop-color="#000308"/><stop offset="1" stop-color="#000104"/></radialGradient>
+<linearGradient id="${gid}l" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#DCF3FF" stop-opacity=".30"/><stop offset=".5" stop-color="#DCF3FF" stop-opacity="0"/></linearGradient>
+<filter id="${gid}b" x="-90%" y="-90%" width="280%" height="280%"><feGaussianBlur stdDeviation="7"/></filter>
+<filter id="${gid}b2" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="16"/></filter>
+<radialGradient id="${gid}h" cx="50%" cy="50%" r="50%"><stop offset=".55" stop-color="#3BA8FF" stop-opacity="0"/><stop offset=".86" stop-color="#4FB6FF" stop-opacity=".56"/><stop offset="1" stop-color="#3BA8FF" stop-opacity="0"/></radialGradient>
 </defs>
 ${ticks}
-<circle cx="120" cy="120" r="${R + 4}" fill="url(#${uid}h)"/>
-<circle cx="120" cy="120" r="${R - 10}" fill="url(#${uid}c)"/>
-<circle cx="120" cy="120" r="${R}" fill="none" stroke="#0E4694" stroke-width="17" mask="url(#${uid}m)"/>
-<g filter="url(#${uid}b2)" opacity=".62"><circle cx="120" cy="120" r="${R}" fill="none" stroke="#3BA8FF" stroke-width="17" mask="url(#${uid}m)" transform="rotate(-90 120 120)" stroke-dasharray="${(CIRC * pct).toFixed(1)} ${CIRC.toFixed(1)}"/></g>
-<g filter="url(#${uid}b)" opacity=".78"><circle cx="120" cy="120" r="${R}" fill="none" stroke="url(#${uid}a)" stroke-width="17" mask="url(#${uid}m)" transform="rotate(-90 120 120)" stroke-dasharray="${(CIRC * pct).toFixed(1)} ${CIRC.toFixed(1)}"/></g>
-<circle cx="120" cy="120" r="${R}" fill="none" stroke="url(#${uid}a)" stroke-width="17" mask="url(#${uid}m)" transform="rotate(-90 120 120)" stroke-dasharray="${(CIRC * pct).toFixed(1)} ${CIRC.toFixed(1)}"/>
-<circle cx="120" cy="120" r="${R}" fill="none" stroke="url(#${uid}l)" stroke-width="17" mask="url(#${uid}m)"/>
+<circle cx="120" cy="120" r="${R + 4}" fill="url(#${gid}h)"/>
+<circle cx="120" cy="120" r="${R - 10}" fill="url(#${gid}c)"/>
+<circle cx="120" cy="120" r="${R}" fill="none" stroke="#0E4694" stroke-width="17" mask="url(#${gid}m)"/>
+<g filter="url(#${gid}b2)" opacity=".62"><circle cx="120" cy="120" r="${R}" fill="none" stroke="#3BA8FF" stroke-width="17" mask="url(#${gid}m)" transform="rotate(-90 120 120)" stroke-dasharray="${(CIRC * pct).toFixed(1)} ${CIRC.toFixed(1)}"/></g>
+<g filter="url(#${gid}b)" opacity=".78"><circle cx="120" cy="120" r="${R}" fill="none" stroke="url(#${gid}a)" stroke-width="17" mask="url(#${gid}m)" transform="rotate(-90 120 120)" stroke-dasharray="${(CIRC * pct).toFixed(1)} ${CIRC.toFixed(1)}"/></g>
+<circle cx="120" cy="120" r="${R}" fill="none" stroke="url(#${gid}a)" stroke-width="17" mask="url(#${gid}m)" transform="rotate(-90 120 120)" stroke-dasharray="${(CIRC * pct).toFixed(1)} ${CIRC.toFixed(1)}"/>
+<circle cx="120" cy="120" r="${R}" fill="none" stroke="url(#${gid}l)" stroke-width="17" mask="url(#${gid}m)"/>
 <circle cx="120" cy="120" r="${R - 10}" fill="none" stroke="#4FB6FF" stroke-opacity=".34" stroke-width="1"/>
 </svg>` } }),
                     React.createElement("div", { style: { position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", padding: "0 62px" } },
