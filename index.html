@@ -2015,7 +2015,8 @@ function Commitments({ data, update }) {
                 React.createElement("span", { style: { fontSize: 12.5, color: C.textFaint, lineHeight: 1.4 } }, pwPlan.msg))),
         React.createElement(SectionTitle, null, "Commitments"),
         React.createElement(Card, null,
-            s.projects.length === 0 && React.createElement(Empty, null, "No commitments yet. Tap \uFF0B to add one."),
+            s.projects.length === 0 && React.createElement(Empty, null, "No commitments yet."),
+            React.createElement("button", { onClick: () => setAdding(true), style: { width: "100%", marginTop: 10, padding: "15px 0", borderRadius: 16, border: `1px dashed ${C.blue}55`, background: `${C.blue}0d`, color: C.blue, fontSize: 14.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer" } }, "\uFF0B  New commitment"),
             s.projects.map((p, idx) => {
                 const need = Math.max(0, Number(p.target || 0) - Number(p.allocated || 0));
                 const wst = commitmentWeekStatus(data, p);
